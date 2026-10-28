@@ -244,6 +244,14 @@ def t_game_mode(log):
     log("Game Mode turned on.")
 
 
+HAGS_KEY = r"SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+
+
+def t_hags(log):
+    set_reg(HKLM, HAGS_KEY, "HwSchMode", 2)
+    log("Hardware-accelerated GPU scheduling turned on. Restart Windows for it to take effect.")
+
+
 def _reg(root, path, name, default=None):
     try:
         with winreg.OpenKey(root, path) as key:
@@ -291,10 +299,12 @@ ACTIVE_CHECKS = {
     "t_sounds": lambda: _reg(HKCU, r"AppEvents\Schemes", "") == ".None",
     "t_mactype": lambda: bool(_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "MacType")),
     "t_cursor": lambda: _reg(HKCU, r"Control Panel\Cursors", "") == "Big Sur",
-    "t_notepad": lambda: _reg(HKLM, r"SOFTWARE\Policies\WindowsNotepad", "DisableAIFeatures") == 1,
+    "t_notepad": lambda: _active_notepad(),
+    "t_nvidia_profile": lambda: os.path.isfile(NVIDIA_MARKER),
     "t_mouse_accel": lambda: _all_reg(HKCU, r"Control Panel\Mouse",
                                        ("MouseSpeed", "MouseThreshold1", "MouseThreshold2"), "0"),
     "t_sticky_keys": lambda: _reg(HKCU, r"Control Panel\Accessibility\StickyKeys", "Flags") == "506",
+    "t_hags": lambda: _reg(HKLM, HAGS_KEY, "HwSchMode") == 2,
     "t_game_mode": lambda: _all_reg(HKCU, r"Software\Microsoft\GameBar",
                                      ("AutoGameModeEnabled", "AllowAutoGameMode"), 1),
     "t_smart_app_control": lambda: _reg(
@@ -368,7 +378,9 @@ def revert_tweak(fn, log):
         set_reg(HKCU, r"Control Panel\Cursors", "Scheme Source", 2)
         ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 3)
     elif name == "t_notepad":
-        _delete_reg(HKLM, r"SOFTWARE\Policies\WindowsNotepad", "DisableAIFeatures")
+        if not _notepad_restore():
+            log("No saved Notepad settings backup; Notepad will recreate its defaults.")
+        _delete_reg(HKLM, r"SOFTWARE\Policies\WindowsNotepad", "DisableAIFeatures")  # left by older versions
     elif name == "t_mouse_accel":
         for value, data in (("MouseSpeed", "1"), ("MouseThreshold1", "6"), ("MouseThreshold2", "10")):
             set_str(HKCU, r"Control Panel\Mouse", value, data)
@@ -379,6 +391,9 @@ def revert_tweak(fn, log):
         set_str(HKCU, key + r"\StickyKeys", "Flags", "510")
         set_str(HKCU, key + r"\ToggleKeys", "Flags", "58")
         set_str(HKCU, key + r"\Keyboard Response", "Flags", "126")
+    elif name == "t_hags":
+        set_reg(HKLM, HAGS_KEY, "HwSchMode", 1)
+        log("Restart Windows for the change to take effect.")
     elif name == "t_game_mode":
         set_reg(HKCU, r"Software\Microsoft\GameBar", "AutoGameModeEnabled", 0)
         set_reg(HKCU, r"Software\Microsoft\GameBar", "AllowAutoGameMode", 0)
@@ -402,7 +417,9 @@ def revert_tweak(fn, log):
         out = run(["dism", "/online", "/enable-feature", "/featurename:Recall", "/norestart"])
         if out and "error" in out.lower():
             raise RuntimeError(out[-300:])
-    elif name in {"t_temp", "t_group_policy", "t_nvidia_profile"}:
+    elif name == "t_nvidia_profile":
+        _revert_nvidia_profile(log)
+    elif name in {"t_temp", "t_group_policy"}:
         raise RuntimeError("This action does not have a safe automatic Windows default to restore.")
     else:
         raise RuntimeError(f"No revert handler is defined for {name}.")
@@ -451,56 +468,163 @@ def t_mactype(log):
     log(f"MacType profile set to {MACTYPE_PROFILE}; tray app started and added to startup.")
 
 
+WINRT_INT32, WINRT_STRING = 100000004, 100000012  # registry types used by packaged-app settings.dat
+NOTEPAD_FONT = {"FontFamily": "Consolas", "FontSize": 14, "FontStyle": "Regular"}
+NOTEPAD_SETTINGS_DIR = r"%LOCALAPPDATA%\Packages\Microsoft.WindowsNotepad_8wekyb3d8bbwe\Settings"
+NOTEPAD_BACKUP_DIR = r"%LOCALAPPDATA%\kernel\notepad-settings-backup"
+
+
+def _notepad_files(directory):
+    return glob.glob(os.path.join(os.path.expandvars(directory), "settings.dat*"))
+
+
+def _retry(fn, *args):
+    import time
+    for attempt in range(20):
+        try:
+            return fn(*args)
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.5)
+
+
+def _notepad_backup():
+    backup = os.path.expandvars(NOTEPAD_BACKUP_DIR)
+    if _notepad_files(NOTEPAD_BACKUP_DIR):
+        return
+    staging = backup + ".tmp"
+    shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging)
+    for f in _notepad_files(NOTEPAD_SETTINGS_DIR):
+        _retry(shutil.copy2, f, staging)
+    shutil.rmtree(backup, ignore_errors=True)
+    os.replace(staging, backup)
+
+
+def _notepad_restore():
+    run(["taskkill", "/f", "/im", "notepad.exe"])
+    for f in _notepad_files(NOTEPAD_SETTINGS_DIR):
+        _retry(os.remove, f)
+    backup = _notepad_files(NOTEPAD_BACKUP_DIR)
+    for f in backup:
+        _retry(shutil.copy2, f, os.path.expandvars(NOTEPAD_SETTINGS_DIR))
+    return bool(backup)
+
+
+def _appkey_open(path, write=False):
+    """Open a packaged app's settings.dat as a private registry root (no admin or hive load needed)."""
+    import ctypes.wintypes as wt
+    adv = ctypes.WinDLL("advapi32")
+    handle = ctypes.c_void_p
+    adv.RegLoadAppKeyW.argtypes = [wt.LPCWSTR, ctypes.POINTER(handle), wt.DWORD, wt.DWORD, wt.DWORD]
+    adv.RegCloseKey.argtypes = [handle]
+    root = handle()
+    err = adv.RegLoadAppKeyW(path, ctypes.byref(root), 0x20006 if write else 0x20019, 0, 0)
+    if err:
+        raise OSError(err, f"Could not open Notepad settings (error {err}).")
+    return adv, root
+
+
+def _notepad_values(path):
+    """Return {name: (registry type, bytes)} for the Notepad font values in a settings.dat."""
+    import ctypes.wintypes as wt
+    adv, root = _appkey_open(path)
+    handle = ctypes.c_void_p
+    adv.RegOpenKeyExW.argtypes = [handle, wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.POINTER(handle)]
+    adv.RegQueryValueExW.argtypes = [handle, wt.LPCWSTR, ctypes.c_void_p, ctypes.POINTER(wt.DWORD),
+                                     ctypes.c_void_p, ctypes.POINTER(wt.DWORD)]
+    out = {}
+    try:
+        key = handle()
+        if adv.RegOpenKeyExW(root, "LocalState", 0, 0x20019, ctypes.byref(key)):
+            return out
+        for name in NOTEPAD_FONT:
+            buf = (ctypes.c_ubyte * 512)()
+            size = wt.DWORD(512)
+            typ = wt.DWORD()
+            if adv.RegQueryValueExW(key, name, None, ctypes.byref(typ), buf, ctypes.byref(size)) == 0:
+                out[name] = (typ.value, bytes(buf[:size.value]))
+        adv.RegCloseKey(key)
+    finally:
+        adv.RegCloseKey(root)
+    return out
+
+
+def _notepad_font_payload(name, value):
+    import struct
+    if name == "FontSize":
+        return WINRT_INT32, struct.pack("<i", value)
+    return WINRT_STRING, value.encode("utf-16-le") + b"\0\0"
+
+
+_notepad_state = [False]
+
+
+def _active_notepad():
+    import tempfile
+    src = _notepad_files(NOTEPAD_SETTINGS_DIR)
+    if not src:
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            for f in src:
+                with open(f, "rb") as a, open(os.path.join(tmp, os.path.basename(f)), "wb") as b:
+                    shutil.copyfileobj(a, b)
+            current = _notepad_values(os.path.join(tmp, "settings.dat"))
+        except PermissionError:
+            return _notepad_state[0]  # Windows locks the file while Notepad is open
+        except OSError:
+            return False
+    def matches(name, value):
+        typ, want = _notepad_font_payload(name, value)
+        return name in current and current[name][0] == typ and current[name][1][:len(want)] == want
+
+    _notepad_state[0] = all(matches(n, v) for n, v in NOTEPAD_FONT.items())
+    return _notepad_state[0]
+
+
 def t_notepad(log):
-    set_reg(HKLM, r"SOFTWARE\Policies\WindowsNotepad", "DisableAIFeatures", 1)
-    log("Notepad AI/Copilot features disabled by policy.")
-    pkg = os.path.expandvars(r"%LOCALAPPDATA%\Packages\Microsoft.WindowsNotepad_8wekyb3d8bbwe\Settings\settings.dat")
+    pkg = os.path.join(os.path.expandvars(NOTEPAD_SETTINGS_DIR), "settings.dat")
     if not os.path.isfile(pkg):
         raise RuntimeError("Notepad settings not found. Open Notepad once, then try again.")
     run(["taskkill", "/f", "/im", "notepad.exe"])
-    hive = "kernel_notepad"
-    out = run(["reg", "load", f"HKLM\\{hive}", pkg])
-    if "success" not in out.lower():
-        raise RuntimeError(f"Could not open Notepad settings: {out}")
+    _notepad_backup()
     try:
-        import struct
-        import time
-        stamp = struct.pack("<Q", int(time.time() * 1e7) + 116444736000000000)
-        wanted = {"FontFamily": "Consolas", "FontSize": 14, "FontStyle": "Regular"}
-
-        def apply(key):
-            for name, val in wanted.items():
-                try:
-                    old, typ = winreg.QueryValueEx(key, name)
-                except OSError:
-                    old, typ = None, None
-                tail = old[-8:] if isinstance(old, bytes) and len(old) >= 8 else stamp
-                if name == "FontSize":
-                    winreg.SetValueEx(key, name, 0, winreg.REG_BINARY, struct.pack("<i", val) + tail)
-                else:
-                    winreg.SetValueEx(key, name, 0, winreg.REG_BINARY, val.encode("utf-16-le") + b"\0\0" + tail)
-
-        found = []
-
-        def walk(path):
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
-                names = [winreg.EnumValue(k, i)[0] for i in range(winreg.QueryInfoKey(k)[1])]
-                if "FontSize" in names or "FontFamily" in names:
-                    apply(k)
-                    found.append(path)
-                for i in range(winreg.QueryInfoKey(k)[0]):
-                    walk(path + "\\" + winreg.EnumKey(k, i))
-
-        walk(hive)
-        if not found:
-            with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, hive + r"\LocalState", 0,
-                                    winreg.KEY_SET_VALUE) as k:
-                apply(k)
+        _write_notepad_font(pkg)
+        if not _active_notepad():
+            raise RuntimeError("Notepad font settings did not save correctly.")
         log("Notepad font set to Consolas, Regular, 14.")
+    except Exception:
+        _notepad_restore()
+        log("Notepad settings rolled back to the original.")
+        raise
+
+
+def _write_notepad_font(pkg):
+    import ctypes.wintypes as wt
+    import struct
+    import time
+    adv, root = _appkey_open(pkg, write=True)
+    handle = ctypes.c_void_p
+    adv.RegCreateKeyExW.argtypes = [handle, wt.LPCWSTR, wt.DWORD, wt.LPCWSTR, wt.DWORD, wt.DWORD,
+                                    ctypes.c_void_p, ctypes.POINTER(handle), ctypes.c_void_p]
+    adv.RegSetValueExW.argtypes = [handle, wt.LPCWSTR, wt.DWORD, wt.DWORD, ctypes.c_char_p, wt.DWORD]
+    stamp = struct.pack("<Q", int(time.time() * 1e7) + 116444736000000000)
+    try:
+        key = handle()
+        err = adv.RegCreateKeyExW(root, "LocalState", 0, None, 0, 0x20006, None, ctypes.byref(key), None)
+        if err:
+            raise OSError(err, f"Could not open Notepad settings (error {err}).")
+        for name, value in NOTEPAD_FONT.items():
+            typ, data = _notepad_font_payload(name, value)
+            data += stamp
+            err = adv.RegSetValueExW(key, name, 0, typ, data, len(data))
+            if err:
+                raise OSError(err, f"Could not write {name} (error {err}).")
+        adv.RegCloseKey(key)
     finally:
-        import gc
-        gc.collect()
-        run(["reg", "unload", f"HKLM\\{hive}"])
+        adv.RegCloseKey(root)
 
 CURSOR_SLOTS = [
     ("Arrow", "arrow.cur"), ("Help", "helpsel.cur"), ("AppStarting", "working.ani"), ("Wait", "busy.ani"),
@@ -535,17 +659,18 @@ def t_cursor(log):
     ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 3)
     log("Big Sur cursor scheme installed and applied.")
 
-def t_nvidia_profile(log):
-    import sys
+NVIDIA_MARKER = os.path.join(os.environ.get("APPDATA", ""), "kernel", "nvidia_profile_applied")
+
+
+def _npi_exe(log):
     import urllib.request
     import zipfile
     import apps
     if not glob.glob(os.path.expandvars(r"%SystemRoot%\System32\nvapi64.dll")):
         raise RuntimeError("No NVIDIA driver found. Install the NVIDIA driver first.")
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    nip = os.path.join(base, "assets", "profile.nip")
     tool_dir = os.path.join(os.environ.get("APPDATA", ""), "kernel", "npi")
-    exe = next(iter(glob.glob(os.path.join(tool_dir, "**", "nvidiaProfileInspector.exe"), recursive=True)), None)
+    find = lambda: next(iter(glob.glob(os.path.join(tool_dir, "**", "nvidiaProfileInspector.exe"), recursive=True)), None)
+    exe = find()
     if not exe:
         log("Downloading NVIDIA Profile Inspector...")
         info = apps.show("Orbmu2k.nvidiaProfileInspector")
@@ -559,18 +684,61 @@ def t_nvidia_profile(log):
         with zipfile.ZipFile(zpath) as zf:
             zf.extractall(tool_dir)
         os.remove(zpath)
-        exe = next(iter(glob.glob(os.path.join(tool_dir, "**", "nvidiaProfileInspector.exe"), recursive=True)), None)
+        exe = find()
         if not exe:
             raise RuntimeError("nvidiaProfileInspector.exe was not found in the download.")
-    log("Importing your NVIDIA profile...")
+    return exe
+
+
+def _npi_import(exe, nip):
     r = subprocess.run([exe, "-silent", nip], capture_output=True, text=True,
                        creationflags=NOWIN, timeout=120, cwd=os.path.dirname(exe))
     if r.returncode not in (0, None):
         raise RuntimeError(f"Profile Inspector exited with code {r.returncode}. {(r.stdout + r.stderr).strip()[-200:]}")
+
+
+def _nvidia_defaults_nip():
+    # Same settings as profile.nip, with every value set back to the driver default (0)
+    import re
+    import sys
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(base, "assets", "profile.nip"), "rb") as f:
+        raw = f.read()
+    text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig")
+    text = re.sub(r"<SettingValue>[^<]*</SettingValue>", "<SettingValue>0</SettingValue>", text)
+    path = os.path.join(os.environ.get("TEMP", ""), "kernel_nvidia_defaults.nip")
+    with open(path, "w", encoding="utf-16") as f:
+        f.write(text)
+    return path
+
+
+def t_nvidia_profile(log):
+    import sys
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    exe = _npi_exe(log)
+    log("Importing your NVIDIA profile...")
+    _npi_import(exe, os.path.join(base, "assets", "profile.nip"))
     log("NVIDIA profile imported.")
+    os.makedirs(os.path.dirname(NVIDIA_MARKER), exist_ok=True)
+    with open(NVIDIA_MARKER, "w") as f:
+        f.write("applied")
+
+
+def _revert_nvidia_profile(log):
+    exe = _npi_exe(log)
+    nip = _nvidia_defaults_nip()
+    try:
+        log("Restoring NVIDIA driver defaults for the profile settings...")
+        _npi_import(exe, nip)
+    finally:
+        if os.path.isfile(nip):
+            os.remove(nip)
+    if os.path.isfile(NVIDIA_MARKER):
+        os.remove(NVIDIA_MARKER)
+
 
 # Run-once actions shown as buttons instead of toggles
-ONE_SHOT = {"t_temp", "t_group_policy", "t_nvidia_profile"}
+ONE_SHOT = {"t_temp", "t_group_policy"}
 
 # (section, title, description, function)
 TASKS = [
@@ -579,18 +747,19 @@ TASKS = [
     ("Privacy", "Minimize telemetry", "Reduce diagnostic data collection", t_telemetry),
     ("System", "Clean temp files", "Temp, Prefetch and Recycle Bin", t_temp),
     ("System", "Group Policy Editor", "Install gpedit on Windows Home", t_group_policy),
-    ("Gaming", "Ultimate performance", "Activate the maximum performance power plan", t_power),
+    ("Performance", "Ultimate performance", "Activate the maximum performance power plan", t_power),
     ("Appearance", "Hide Widgets & Chat", "Remove the taskbar buttons", t_widgets),
     ("Appearance", "Taskbar date format", "Show the date as MMM d, yyyy (e.g. Dec 31, 2030)", t_time_format),
     ("Appearance", "Enable End Task in taskbar", "Adds 'End task' to the right-click menu of taskbar apps", t_end_task),
     ("Appearance", "Disable Windows sounds", "Sound scheme to 'No Sounds' and no startup chime", t_sounds),
     ("Appearance", "Apply MacType in system tray", "Use the XMac LCD HotShift profile (MacType must be installed)", t_mactype),
     ("Appearance", "Apply Big Sur cursor", "Install the Big Sur cursor pack and apply it as your cursor scheme", t_cursor),
-    ("Gaming", "NVIDIA profile", "Import your saved NVIDIA Profile Inspector settings", t_nvidia_profile),
-    ("Apps", "Notepad settings", "Consolas Regular 14 and Notepad's Copilot/AI turned off", t_notepad),
+    ("Performance", "NVIDIA profile", "Import your saved NVIDIA Profile Inspector settings", t_nvidia_profile),
+    ("Appearance", "Notepad settings", "Set Notepad's font to Consolas Regular 14", t_notepad),
     ("Input", "Disable enhanced mouse precision", "Turns off pointer acceleration for consistent aim", t_mouse_accel),
     ("Input", "Disable Sticky Keys", "Stops the popup when Shift is pressed five times", t_sticky_keys),
-    ("Gaming", "Enable Game Mode", "Prioritizes games and limits background activity", t_game_mode),
+    ("Performance", "Enable Game Mode", "Prioritizes games and limits background activity", t_game_mode),
+    ("Performance", "Hardware-accelerated GPU scheduling", "Let the GPU manage its own memory, lowering CPU overhead (restart required)", t_hags),
     ("Security", "Disable Smart App Control", "Stops blocking unsigned or unknown apps (permanent until Windows reset)", t_smart_app_control),
     ("Security", "Disable Core isolation", "Turn off Memory integrity (HVCI) for better performance", t_core_isolation),
     ("Privacy", "Disable Nearby sharing", "Stops sharing with nearby PCs", t_nearby),

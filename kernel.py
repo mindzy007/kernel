@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from shiboken6 import isValid
 
 import apps
+import specs
 from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, is_active, revert_tweak
 
@@ -54,8 +55,8 @@ QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 """
 
-TWEAKS, APPS, ACTIVITY, SETTINGS = range(4)
-GLYPH = {"tweaks": "\uE9E9", "apps": "\uF0E2", "downloads": "\uE896", "activity": "\uE9D9",
+TWEAKS, APPS, GAMING, SPECS, ACTIVITY, SETTINGS = range(6)
+GLYPH = {"tweaks": "\uE9E9", "apps": "\uF0E2", "gaming": "\uE7FC", "specs": "\uE770", "downloads": "\uE896", "activity": "\uE9D9",
          "settings": "\uE713"}
 
 
@@ -191,6 +192,72 @@ class AnimButton(QPushButton):
         p.translate(-c)
 
 
+class LogView(QPlainTextEdit):
+    """Log box with Copy and Clear buttons floating in its top-right corner."""
+
+    def __init__(self, clearable=True):
+        super().__init__()
+        self.copy_btn = Button("Copy")
+        self.clear_btn = Button("Clear")
+        for b in (self.copy_btn, self.clear_btn):
+            b.setParent(self)
+            b.setCursor(Qt.PointingHandCursor)
+            b.show()
+        self.clear_btn.setVisible(clearable)
+        self.copy_label = "Copy"
+        self.copy_btn.clicked.connect(self.copy_all)
+        self.clear_btn.clicked.connect(self.clear)
+
+    def flash_copied(self):
+        self.copy_btn.setText("Copied")
+        QTimer.singleShot(1200, lambda: self.copy_btn.setText(self.copy_label))
+
+    def copy_all(self):
+        QApplication.clipboard().setText(self.toPlainText())
+        self.flash_copied()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        x = self.width() - 12
+        for b in (self.clear_btn, self.copy_btn):
+            if b.isHidden():
+                continue
+            b.setFixedWidth(88)
+            b.adjustSize()
+            x -= b.width()
+            b.move(x, 12)
+            b.raise_()
+            x -= 8
+
+
+class SpecView(LogView):
+    """Read-only spec list: click a line to copy its value, or copy everything."""
+
+    def __init__(self):
+        super().__init__(clearable=False)
+        self.copy_label = "Copy all"
+        self.copy_btn.setText(self.copy_label)
+        self.setReadOnly(True)
+        self.setCursor(Qt.PointingHandCursor)
+        self.viewport().setCursor(Qt.PointingHandCursor)
+        self.values = []
+
+    def set_specs(self, specs):
+        self.values = [v for _, v in specs]
+        width = max((len(k) for k, _ in specs), default=0) + 2
+        self.setPlainText("\n".join(f"{k + ':':<{width}}{v}" for k, v in specs))
+
+    def mousePressEvent(self, e):
+        cur = self.cursorForPosition(e.position().toPoint())
+        i = cur.blockNumber()
+        if e.button() == Qt.LeftButton and 0 <= i < len(self.values):
+            QApplication.clipboard().setText(self.values[i])
+            cur.select(cur.SelectionType.LineUnderCursor)
+            self.setTextCursor(cur)
+            self.flash_copied()
+        super().mousePressEvent(e)
+
+
 class Button(AnimButton):
     KINDS = {
         "ghost": dict(base=(15, 15, 15), hov=(26, 26, 26), text=(240, 240, 240), size=15, weight=QFont.Normal,
@@ -204,6 +271,7 @@ class Button(AnimButton):
         super().__init__(text)
         self.k = self.KINDS[kind]
         self.kind = kind
+        self.backdrop = None
         f = QFont(self.font())
         f.setPixelSize(self.k["size"])
         f.setWeight(self.k["weight"])
@@ -279,7 +347,15 @@ class Button(AnimButton):
         if on and self.kind == "accent":
             p.fillPath(path, self.accent_brush(r, dark))
         else:
-            p.fillPath(path, QColor(*(int(c) for c in base)))
+            if self.kind == "pill" and self.backdrop and not lit and on:
+                pm, src = self.backdrop
+                p.setClipPath(path)
+                p.fillPath(path, QColor(*(int(c) for c in base)))
+                p.drawPixmap(r, pm, src)
+                p.fillPath(path, QColor(*(int(c) for c in base), 110))
+                p.setClipping(False)
+            else:
+                p.fillPath(path, QColor(*(int(c) for c in base)))
             edge = QPainterPath()
             edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), k["r"], k["r"])
             p.setPen(QPen(QColor(255, 255, 255, int(22 + 14 * self._hover)), 1))
@@ -742,6 +818,7 @@ class Page(QScrollArea):
     def __init__(self, title):
         super().__init__()
         self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         content = QWidget()
         content.setObjectName("content")
         self.setWidget(content)
@@ -832,6 +909,8 @@ class SearchDock(QWidget):
         self._focus = 0.0
         self._base_rect = QRect()
         self.backdrop = QPixmap()
+        self.backdrop_src = QRectF()
+        self.backdrop_k = 1.0
         self.focus_anim = QPropertyAnimation(self, b"focusProgress", self)
         self.focus_anim.setDuration(360)
         self.focus_anim.setEasingCurve(
@@ -893,12 +972,25 @@ class SearchDock(QWidget):
     def capture_backdrop(self):
         if not self.isVisible() or self.width() <= 0:
             return
-        top_left = self.page.mapFrom(self.parentWidget(), self.geometry().topLeft())
-        shot = self.page.grab(QRect(top_left, self.size()))
-        if not shot.isNull():
-            shot.setDevicePixelRatio(1.0)
-            self.backdrop = blurred(shot, radius=22)
-            self.update()
+        m = 24
+        g = self._base_rect
+        if g.isNull():
+            return
+        area = QRect(self.page.mapTo(self.parentWidget(), QPoint(0, 0)), self.page.size())
+        region = g.adjusted(-m, -m, m, m) & area
+        if region.isEmpty():
+            return
+        shot = self.page.grab(QRect(self.page.mapFrom(self.parentWidget(), region.topLeft()), region.size()))
+        if shot.isNull():
+            return
+        shot.setDevicePixelRatio(1.0)
+        pm = blurred(shot, radius=10)
+        k = pm.width() / region.width()
+        off = g.topLeft() - region.topLeft()
+        self.backdrop = pm
+        self.backdrop_k = k
+        self.backdrop_src = QRectF(off.x() * k, off.y() * k, g.width() * k, g.height() * k)
+        self.update()
 
     def place(self):
         host = self.parentWidget()
@@ -918,8 +1010,10 @@ class SearchDock(QWidget):
         p.setClipPath(path)
         p.fillPath(path, QColor(14, 14, 14, 235))
         if not self.backdrop.isNull():
-            p.drawPixmap(QRectF(self.rect()), self.backdrop, QRectF(self.backdrop.rect()))
-            p.fillPath(path, QColor(14, 14, 14, 125))
+            dx = (self.width() - self._base_rect.width()) / 2 * self.backdrop_k
+            dy = (self.height() - self._base_rect.height()) / 2 * self.backdrop_k
+            p.drawPixmap(QRectF(self.rect()), self.backdrop, self.backdrop_src.adjusted(-dx, -dy, dx, dy))
+            p.fillPath(path, QColor(14, 14, 14, 110))
         p.setClipping(False)
         a = round(32 + 20 * self._focus)
         width = 1.0 + 0.1 * self._focus
@@ -953,6 +1047,7 @@ class Kernel(QWidget):
     logged = Signal(str)
     found = Signal(list)
     icon_ready = Signal(str, QImage)
+    specs_ready = Signal(list)
 
     def __init__(self):
         super().__init__()
@@ -1011,13 +1106,16 @@ class Kernel(QWidget):
         self.action_rows = []
         self.stack.addWidget(self.build_tweaks())
         self.stack.addWidget(self.build_apps())
+        self.stack.addWidget(self.build_gaming())
+        self.stack.addWidget(self.build_specs())
         self.stack.addWidget(self.build_activity())
         self.stack.addWidget(self.build_settings())
 
         self.navs = []
         group = QButtonGroup(self)
         for text, idx, g in (("Tweaks", TWEAKS, "tweaks"), ("Applications", APPS, "apps"),
-                             ("Activity", ACTIVITY, "activity")):
+                                     ("Performance", GAMING, "gaming"),
+                             ("Specifications", SPECS, "specs"), ("Activity", ACTIVITY, "activity")):
             sl.addWidget(self.nav(text, idx, g, group))
         sl.addStretch()
         sl.addWidget(self.nav("Settings", SETTINGS, "settings", group))
@@ -1082,6 +1180,7 @@ class Kernel(QWidget):
         pl.addWidget(self.dl_hint)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setObjectName("dlscroll")
         scroll.setStyleSheet("#dlscroll { background: transparent; border: none; }")
         scroll.viewport().setObjectName("dlvp")
@@ -1105,8 +1204,41 @@ class Kernel(QWidget):
         self.pill.setIcon(glyph_icon(GLYPH["downloads"], 18, TEXT))
         self.pill.setCheckable(True)
         self.pill.clicked.connect(self.toggle_downloads)
+        self.pill_tick = QTimer(self)
+        self.pill_tick.setInterval(250)
+        self.pill_tick.timeout.connect(self.refresh_pill_backdrop)
+        self.pill_tick.start()
+        for i in range(self.stack.count()):
+            w = self.stack.widget(i)
+            for sa in ([w] if isinstance(w, QScrollArea) else w.findChildren(QScrollArea)):
+                sa.verticalScrollBar().valueChanged.connect(self.refresh_pill_backdrop)
         self.fade = None
         self.place_overlay()
+
+    def refresh_pill_backdrop(self):
+        if (not self.pill.isVisible() or not self.isActiveWindow() or self.overlay.isVisible()
+                or self.fade or self.pill.isDown()):
+            return
+        g = self.pill.geometry()
+        cur = self.stack.currentWidget()
+        page = cur if isinstance(cur, QScrollArea) else cur.findChild(QScrollArea)
+        if page is None:
+            self.pill.backdrop = None
+            return
+        m = 24
+        area = QRect(page.mapTo(self, QPoint(0, 0)), page.size())
+        region = g.adjusted(-m, -m, m, m) & area
+        if region.isEmpty():
+            return
+        shot = page.grab(QRect(page.mapFrom(self, region.topLeft()), region.size()))
+        if shot.isNull():
+            return
+        shot.setDevicePixelRatio(1.0)
+        pm = blurred(shot, radius=10)
+        k = pm.width() / region.width()
+        off = g.topLeft() - region.topLeft()
+        self.pill.backdrop = (pm, QRectF(off.x() * k, off.y() * k, g.width() * k, g.height() * k))
+        self.pill.update()
 
     def place_overlay(self):
         w, h = self.width(), self.height()
@@ -1130,15 +1262,20 @@ class Kernel(QWidget):
             self.collapse_downloads()
 
     def expand_downloads(self):
-        if self.overlay.isVisible():
+        closing = bool(self.fade) and not self.fade_show
+        if self.overlay.isVisible() and not closing:
             return
-        self.pill.hide()
-        shot = self.grab()
-        self.pill.show()
-        self.overlay.panel.bg = blurred(shot)
+        start = 0.0
+        if closing:
+            start = self.overlay.graphicsEffect().opacity() if self.overlay.graphicsEffect() else 1.0
+        else:
+            self.pill.hide()
+            shot = self.grab()
+            self.pill.show()
+            self.overlay.panel.bg = blurred(shot)
         self.place_overlay()
         self.pill.setChecked(True)
-        self.run_fade(0.0, 1.0, show=True)
+        self.run_fade(start, 1.0, show=True)
         self.overlay.raise_()
         self.pill.raise_()
 
@@ -1201,7 +1338,7 @@ class Kernel(QWidget):
             return
         self.finish_anim()
         self.stack.setCurrentIndex(index)
-        self.footer.setVisible(index == TWEAKS)
+        self.footer.setVisible(index in (TWEAKS, GAMING))
         page = self.stack.currentWidget()
         fx = QGraphicsOpacityEffect(page)
         fx.setOpacity(0.0)
@@ -1292,16 +1429,18 @@ class Kernel(QWidget):
 
     # ---- pages ----
 
-    def build_tweaks(self):
-        page = Page("Tweaks")
-        SECTION_ORDER = ("Appearance", "System", "Gaming")
+    def build_gaming(self):
+        return self.build_tweaks("Performance", ("Performance",))
+
+    def build_tweaks(self, title="Tweaks", SECTION_ORDER=("Appearance", "System")):
+        page = Page(title)
         CATEGORY_MAP = {
             "Privacy": "System",
             "Apps": "System",
             "Input": "System",
             "Security": "System",
         }
-        INLINE = {"Appearance", "Gaming"}
+        INLINE = {"Appearance", "Performance"}
         visible = [(CATEGORY_MAP.get(cat, cat), name, desc, fn)
                    for cat, name, desc, fn in TASKS]
         toggles = [t for t in visible if t[3].__name__ not in ONE_SHOT]
@@ -1326,11 +1465,12 @@ class Kernel(QWidget):
             if action_names:
                 for _, name, desc, fn in (t for t in visible if t[0] == cat and t[3].__name__ in action_names):
                     page.add(run_row(name, fn))
-        page.section("Quick actions")
-        for _, name, desc, fn in (t for t in TASKS
-                                  if t[3].__name__ in ONE_SHOT
-                                  and t[0] not in INLINE):
-            page.add(run_row(name, fn))
+        if title == "Tweaks":
+            page.section("Quick actions")
+            for _, name, desc, fn in (t for t in TASKS
+                                      if t[3].__name__ in ONE_SHOT
+                                      and t[0] not in INLINE):
+                page.add(run_row(name, fn))
         page.col.addStretch()
         return page
 
@@ -1406,6 +1546,28 @@ class Kernel(QWidget):
             shown += vis
         self.no_match.setVisible(bool(q) and shown == 0)
 
+    def build_specs(self):
+        page = QWidget()
+        pl = QVBoxLayout(page)
+        pl.setContentsMargins(20, 28, 20, 28)
+        t = QLabel("Specifications")
+        t.setObjectName("title")
+        pl.addWidget(t)
+        pl.addSpacing(16)
+        self.spec_view = SpecView()
+        self.spec_view.setPlainText("Detecting your hardware...")
+        SmoothScroller(self.spec_view)
+        pl.addWidget(self.spec_view, 1)
+        self.specs_ready.connect(self.spec_view.set_specs)
+
+        def work():
+            try:
+                self.specs_ready.emit(specs.collect())
+            except Exception as ex:
+                self.specs_ready.emit([("Error", f"Could not detect specs ({ex})")])
+        threading.Thread(target=work, daemon=True).start()
+        return page
+
     def build_activity(self):
         page = QWidget()
         pl = QVBoxLayout(page)
@@ -1414,17 +1576,8 @@ class Kernel(QWidget):
         t.setObjectName("title")
         pl.addWidget(t)
         pl.addSpacing(16)
-        bar = QHBoxLayout()
-        bar.addStretch()
-        clear = Button("Clear")
-        clear.setCursor(Qt.PointingHandCursor)
-        clear.setMinimumWidth(96)
-        bar.addWidget(clear)
-        pl.addLayout(bar)
-        pl.addSpacing(8)
-        self.log = QPlainTextEdit()
+        self.log = LogView()
         self.log.setReadOnly(True)
-        clear.clicked.connect(self.log.clear)
         SmoothScroller(self.log)
         pl.addWidget(self.log, 1)
         return page
