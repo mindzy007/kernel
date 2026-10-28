@@ -1,0 +1,482 @@
+"""App catalog, winget helpers and a direct downloader.
+
+Installers come straight from each publisher: the URL and SHA256 are read from the winget
+manifest, the file is fetched from the publisher's own server and the hash is verified.
+"""
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+import time
+import urllib.request
+from urllib.parse import unquote, urlparse
+
+NOWIN = 0x08000000  # CREATE_NO_WINDOW
+
+# Apps with no winget package: a stable publisher link that redirects to the current installer
+DIRECT = {"UniversalAudio.UAConnect": "https://www.uaudio.com/apps/uaconnect/win/installer"}
+
+# (category, display name, winget id, website used for the icon)
+CATALOG = [
+    ("Browsers", "Google Chrome", "Google.Chrome", "chrome.google.com"),
+    ("Browsers", "Mozilla Firefox", "Mozilla.Firefox", "firefox.com"),
+    ("Browsers", "Brave", "Brave.Brave", "brave.com"),
+    ("Browsers", "Zen Browser", "Zen-Team.Zen-Browser", "zen-browser.app"),
+    ("Browsers", "Vivaldi", "Vivaldi.Vivaldi", "vivaldi.com"),
+    ("Communication", "Discord", "Discord.Discord", "discord.com"),
+    ("Communication", "Zoom", "Zoom.Zoom", "zoom.us"),
+    ("Communication", "Telegram", "Telegram.TelegramDesktop", "telegram.org"),
+    ("Communication", "Slack", "SlackTechnologies.Slack", "slack.com"),
+    ("Communication", "Vencord", "Vendicated.Vencord", "vencord.dev"),
+    ("Gaming", "Steam", "Valve.Steam", "store.steampowered.com"),
+    ("Gaming", "Epic Games Launcher", "EpicGames.EpicGamesLauncher", "epicgames.com"),
+    ("Gaming", "GOG Galaxy", "GOG.Galaxy", "gog.com"),
+    ("Gaming", "Ubisoft Connect", "Ubisoft.Connect", "ubisoft.com"),
+    ("Gaming", "EA app", "ElectronicArts.EADesktop", "ea.com"),
+    ("Gaming", "Battle.net", "Blizzard.BattleNet", "battle.net"),
+    ("Hardware", "NVIDIA Profile Inspector", "Orbmu2k.nvidiaProfileInspector", "nvidia.com"),
+    ("Hardware", "Display Driver Uninstaller", "Wagnardsoft.DisplayDriverUninstaller", "wagnardsoft.com"),
+    ("Hardware", "Razer Synapse 4", "RazerInc.RazerInstaller.Synapse4", "razer.com"),
+    ("Hardware", "NZXT CAM", "NZXT.CAM", "nzxt.com"),
+    ("Hardware", "L-Connect 3", "LianLi.LConnect3", "lian-li.com"),
+    ("Hardware", "Elgato Stream Deck", "Elgato.StreamDeck", "elgato.com"),
+    ("Firmware", "UA Connect", "UniversalAudio.UAConnect", "uaudio.com"),
+    ("Firmware", "Logitech G HUB", "Logitech.GHUB", "logitechg.com"),
+    ("Firmware", "Logi Options+", "Logitech.OptionsPlus", "logitech.com"),
+    ("Firmware", "Corsair iCUE 5", "Corsair.iCUE.5", "corsair.com"),
+    ("Firmware", "SteelSeries GG", "SteelSeries.GG", "steelseries.com"),
+    ("Firmware", "Focusrite Control 2", "FocusriteAudioEngineeringLtd.FocusriteControl2", "focusrite.com"),
+    ("Firmware", "Elgato Camera Hub", "Elgato.CameraHub", "elgato.com"),
+    ("Firmware", "Wacom Tablet Driver", "Wacom.WacomTabletDriver", "wacom.com"),
+    ("Firmware", "Crucial Storage Executive", "Crucial.StorageExecutive", "crucial.com"),
+    ("Firmware", "Kingston SSD Manager", "Kingston.SSDManager", "kingston.com"),
+    ("Firmware", "ASUS Armoury Crate", "Asus.ArmouryCrate", "asus.com"),
+    ("Firmware", "MSI Center", "MSI.MSICenter", "msi.com"),
+    ("Firmware", "Dell Command | Update", "Dell.CommandUpdate", "dell.com"),
+    ("Firmware", "Lenovo System Update", "Lenovo.SystemUpdate", "lenovo.com"),
+    ("Firmware", "HP Support Assistant", "HP.SupportAssistant", "hp.com"),
+    ("Media", "OBS Studio", "OBSProject.OBSStudio", "obsproject.com"),
+    ("Media", "VLC", "VideoLAN.VLC", "videolan.org"),
+    ("Media", "Spotify", "Spotify.Spotify", "spotify.com"),
+    ("Media", "Audacity", "Audacity.Audacity", "audacityteam.org"),
+    ("Media", "HandBrake", "HandBrake.HandBrake", "handbrake.fr"),
+    ("Utilities", "7-Zip", "7zip.7zip", "7-zip.org"),
+    ("Utilities", "Notepad++", "Notepad++.Notepad++", "notepad-plus-plus.org"),
+    ("Utilities", "Everything", "voidtools.Everything", "voidtools.com"),
+    ("Utilities", "PowerToys", "Microsoft.PowerToys", "microsoft.com"),
+    ("Utilities", "ShareX", "ShareX.ShareX", "getsharex.com"),
+    ("Utilities", "qBittorrent", "qBittorrent.qBittorrent", "qbittorrent.org"),
+    ("Utilities", "WinDirStat", "WinDirStat.WinDirStat", "windirstat.net"),
+    ("Utilities", "Rufus", "Rufus.Rufus", "rufus.ie"),
+    ("Utilities", "balenaEtcher", "Balena.Etcher", "etcher.balena.io"),
+    ("Utilities", "AnyDesk", "AnyDesk.AnyDesk", "anydesk.com"),
+    ("Utilities", "CPU-Z", "CPUID.CPU-Z", "cpuid.com"),
+    ("Utilities", "HWMonitor", "CPUID.HWMonitor", "cpuid.com"),
+    ("Utilities", "GPU-Z", "TechPowerUp.GPU-Z", "techpowerup.com"),
+    ("Utilities", "WinSCP", "WinSCP.WinSCP", "winscp.net"),
+    ("Utilities", "Blur AutoClicker", "Blur009.BlurAutoClicker", "github.com"),
+    ("Utilities", "IObit Unlocker", "IObit.IObitUnlocker", "iobit.com"),
+    ("Utilities", "MacType", "MacType.MacType", "github.com"),
+    ("Utilities", "ParkControl", "BitSum.ParkControl", "bitsum.com"),
+    ("Utilities", "Cloudflare WARP", "Cloudflare.Warp", "cloudflare.com"),
+    ("Utilities", "Malwarebytes", "Malwarebytes.Malwarebytes", "malwarebytes.com"),
+    ("Developer", "Git", "Git.Git", "git-scm.com"),
+    ("Developer", "Visual Studio Code", "Microsoft.VisualStudioCode", "code.visualstudio.com"),
+    ("Developer", "Windows Terminal", "Microsoft.WindowsTerminal", "microsoft.com"),
+    ("Developer", "Python 3", "Python.Python.3.13", "python.org"),
+    ("Developer", "Node.js LTS", "OpenJS.NodeJS.LTS", "nodejs.org"),
+    ("Media", "Figma", "Figma.Figma", "figma.com"),
+]
+
+VCREDISTS = [
+    "Microsoft.VCRedist.2005.x86", "Microsoft.VCRedist.2005.x64",
+    "Microsoft.VCRedist.2008.x86", "Microsoft.VCRedist.2008.x64",
+    "Microsoft.VCRedist.2010.x86", "Microsoft.VCRedist.2010.x64",
+    "Microsoft.VCRedist.2012.x86", "Microsoft.VCRedist.2012.x64",
+    "Microsoft.VCRedist.2013.x86", "Microsoft.VCRedist.2013.x64",
+    "Microsoft.VCRedist.2015+.x86", "Microsoft.VCRedist.2015+.x64",
+]
+
+COMMON = ["--source", "winget", "--accept-source-agreements", "--disable-interactivity"]
+OK_HINTS = ("no available upgrade", "newer version", "already installed", "no applicable upgrade")
+PCT = re.compile(r"(\d{1,3})\s*%")
+EXT = {"msi": "msi", "wix": "msi", "msix": "msix", "appx": "msix", "zip": "zip"}
+ICON_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "kernel", "icons")
+
+
+def human(n):
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def winget_path():
+    return shutil.which("winget")
+
+
+def _noise(s):
+    if not s or set(s) <= set("-\\|/ "):
+        return True
+    return "█" in s or "▒" in s or bool(re.match(r"^\d+\s*%$", s)) or \
+        bool(re.match(r"^[\d.]+\s*[KMG]?B\s*/\s*[\d.]+\s*[KMG]?B$", s))
+
+
+def winget(args, job=None, track=True):
+    """Run winget with stdin closed (a hidden-console app has no valid stdin, which can stall it)."""
+    exe = winget_path()
+    if not exe:
+        if job:
+            job.log("winget was not found. Install 'App Installer' from the Microsoft Store.")
+        return 1, ""
+    p = subprocess.Popen([exe] + args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                         creationflags=NOWIN)
+    if job:
+        job.proc = p
+    lines = []
+    for raw in p.stdout:
+        s = raw.strip()
+        if job and job.cancelled:
+            break
+        if job and track:
+            m = PCT.search(s)
+            if m and ("█" in s or "▒" in s or s.endswith("%")):
+                pct = min(int(m.group(1)), 100)
+                if pct >= 100:
+                    job.update(progress=-1, message="Installing…")
+                else:
+                    job.update(progress=pct / 100, message=f"Downloading · {pct}%")
+            elif "starting package install" in s.lower():
+                job.update(progress=-1, message="Installing…")
+        if _noise(s):
+            continue
+        lines.append(s)
+        if job:
+            job.log("   " + s)
+    p.wait()
+    return p.returncode, "\n".join(lines)
+
+
+def _ok(rc, text):
+    return rc == 0 or any(h in text.lower() for h in OK_HINTS)
+
+
+def show(pkg_id):
+    """Read the publisher installer URL / hash / homepage from the winget manifest."""
+    if pkg_id in DIRECT:
+        return _direct(DIRECT[pkg_id])
+    rc, text = winget(["show", "--id", pkg_id, "-e", "--source", "winget",
+                       "--accept-source-agreements"])
+    if rc != 0:
+        return {}
+
+    def grab(pattern):
+        m = re.search(pattern, text, re.I | re.M)
+        return m.group(1) if m else None
+    return {
+        "url": grab(r"Installer Url:\s*(\S+)"),
+        "version": grab(r"^Version:\s*(\S+)"),
+        "sha": grab(r"Installer SHA256:\s*([0-9a-f]{64})"),
+        "type": (grab(r"Installer Type:\s*(\S+)") or "").lower(),
+        "home": grab(r"Homepage:\s*(\S+)") or grab(r"Publisher Url:\s*(\S+)"),
+    }
+
+
+def _direct(url):
+    try:
+        req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0 kernel/1.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            final = r.geturl()
+    except Exception:
+        return {}
+    m = re.search(r"(\d+(?:[_.]\d+)+)", unquote(os.path.basename(urlparse(final).path)))
+    version = m.group(1).replace("_", ".") if m else ""
+    return {"url": final, "version": version, "sha": None, "type": "exe", "home": None}
+
+
+def remote_size(url):
+    """Installer size in bytes without downloading it (HEAD, then a 1-byte ranged GET)."""
+    for method, extra in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
+        try:
+            req = urllib.request.Request(url, method=method,
+                                         headers={"User-Agent": "Mozilla/5.0 kernel/1.0", **extra})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                rng = r.headers.get("Content-Range", "")
+                if "/" in rng and rng.rsplit("/", 1)[1].isdigit():
+                    return int(rng.rsplit("/", 1)[1])
+                n = int(r.headers.get("Content-Length") or 0)
+                if n > 1:
+                    return n
+        except Exception:
+            continue
+    return 0
+
+
+INFO_FILE = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "kernel", "info.json")
+INFO_TTL = 12 * 3600
+_info_lock = threading.Lock()
+
+
+def _info_cache():
+    try:
+        with open(INFO_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def info(pkg_id, refresh=False):
+    """(version, size_bytes) of the installer that Download would fetch. Cached for 12 hours."""
+    with _info_lock:
+        hit = _info_cache().get(pkg_id)
+    if hit and not refresh and time.time() - hit["t"] < INFO_TTL:
+        return hit["version"], hit["size"]
+    data = show(pkg_id) or show(pkg_id)
+    version = data.get("version") or ""
+    size = remote_size(data["url"]) if data.get("url") else 0
+    if size < 512 * 1024:  # redirect/landing pages, not the real installer
+        size = 0
+    if version:
+        with _info_lock:
+            cache = _info_cache()
+            cache[pkg_id] = {"version": version, "size": size, "t": time.time()}
+            os.makedirs(os.path.dirname(INFO_FILE), exist_ok=True)
+            with open(INFO_FILE, "w", encoding="utf-8") as f:
+                json.dump(cache, f)
+    elif hit:
+        return hit["version"], hit["size"]
+    return version, size
+
+
+def fetch_file(url, dest_dir, sha, kind, job):
+    os.makedirs(dest_dir, exist_ok=True)
+    name = unquote(os.path.basename(urlparse(url).path)) or "installer"
+    if "." not in name:
+        name += "." + EXT.get(kind, "exe")
+    final = os.path.join(dest_dir, name)
+    part = final + ".part"
+    req = urllib.request.Request(url, headers={"User-Agent": "kernel/1.0"})
+    ok = False
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            h = hashlib.sha256()
+            done = last_done = 0
+            last = time.monotonic()
+            speed = 0.0
+            while not job.cancelled:
+                chunk = r.read(262144)
+                if not chunk:
+                    break
+                f.write(chunk)
+                h.update(chunk)
+                done += len(chunk)
+                now = time.monotonic()
+                if now - last >= 0.25:
+                    speed = (done - last_done) / (now - last)
+                    last, last_done = now, done
+                    size = f"{human(done)} of {human(total)}" if total else human(done)
+                    pct = f"{done * 100 // total}% · " if total else ""
+                    job.update(progress=done / total if total else -1,
+                               message=f"{pct}{size} · {human(speed)}/s")
+        if job.cancelled:
+            return False
+        stale = bool(sha) and h.hexdigest().lower() != sha.lower()
+        if stale:
+            job.log("   Note: the publisher's file is newer than the winget manifest (its hash is out of date). "
+                    "It was still downloaded over HTTPS from the publisher's own server.")
+        os.replace(part, final)
+        job.path, job.size = final, done
+        job.done_msg = f"Saved · {human(done)}" + (" · latest from publisher" if stale else "")
+        ok = True
+        return True
+    finally:
+        if not ok and os.path.exists(part):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+
+
+def download(pkg_id, dest, job):
+    job.update(progress=-1, message="Looking up publisher download…")
+    info = show(pkg_id)
+    if job.cancelled:
+        return False
+    if info.get("url"):
+        job.log(f"Downloading {pkg_id} from {urlparse(info['url']).hostname}")
+        return fetch_file(info["url"], dest, info.get("sha"), info.get("type"), job)
+    job.log(f"No direct URL for {pkg_id}, using winget download")
+    rc, text = winget(["download", "--id", pkg_id, "-e", "-d", dest,
+                       "--accept-package-agreements"] + COMMON, job)
+    if _ok(rc, text):
+        job.path, job.done_msg = dest, "Saved"
+        return True
+    job.fail_msg = f"Failed (exit {rc})"
+    return False
+
+
+def install(pkg_id, job):
+    if pkg_id in DIRECT:
+        return install_direct(pkg_id, job)
+    job.update(progress=-1, message="Starting…")
+    job.log(f"Installing {pkg_id}")
+    rc, text = winget(["install", "--id", pkg_id, "-e", "--silent",
+                       "--accept-package-agreements"] + COMMON, job)
+    if job.cancelled:
+        return False
+    if not _ok(rc, text) and "hash" in text.lower():
+        # Publisher ships a newer file than the manifest hash (rolling installers like Chrome)
+        job.log("   Manifest hash is out of date, retrying with the publisher's current installer")
+        winget(["settings", "--enable", "InstallerHashOverride"], job, False)
+        rc, text = winget(["install", "--id", pkg_id, "-e", "--silent", "--ignore-security-hash",
+                           "--accept-package-agreements"] + COMMON, job)
+        if job.cancelled:
+            return False
+    ok = _ok(rc, text)
+    job.done_msg, job.fail_msg = "Installed", f"Failed (exit {rc})"
+    return ok
+
+
+def install_direct(pkg_id, job):
+    job.update(progress=-1, message="Looking up publisher download?")
+    info = show(pkg_id)
+    if not info.get("url"):
+        job.fail_msg = "Could not reach the publisher"
+        return False
+    dest = os.path.join(tempfile.gettempdir(), "kernel-installers")
+    if not fetch_file(info["url"], dest, None, "exe", job):
+        return False
+    job.update(progress=-1, message="Launching installer?")
+    os.startfile(job.path)
+    job.done_msg = "Installer opened"
+    return True
+
+
+def vcredists(job):
+    """Install missing C++ redistributables and repair the ones already present."""
+    failed = 0
+    for n, pkg in enumerate(VCREDISTS):
+        if job.cancelled:
+            return False
+        job.update(progress=n / len(VCREDISTS), message=f"{pkg.split('.', 2)[2]} ({n + 1}/{len(VCREDISTS)})")
+        rc, _ = winget(["list", "--id", pkg, "-e", "--accept-source-agreements"], job, False)
+        if rc == 0:
+            job.log(f"{pkg}: installed, repairing")
+            rc, text = winget(["repair", "--id", pkg, "-e", "--accept-package-agreements"] + COMMON,
+                              job, False)
+            if not _ok(rc, text) and not job.cancelled:
+                rc, text = winget(["install", "--id", pkg, "-e", "--force", "--silent",
+                                   "--accept-package-agreements"] + COMMON, job, False)
+        else:
+            job.log(f"{pkg}: missing, installing")
+            rc, text = winget(["install", "--id", pkg, "-e", "--silent",
+                               "--accept-package-agreements"] + COMMON, job, False)
+        if not _ok(rc, text) and not job.cancelled:
+            failed += 1
+            job.log(f"   failed (exit {rc})")
+    if job.cancelled:
+        return False
+    job.done_msg = "All installed and repaired"
+    job.fail_msg = f"{failed} package(s) failed"
+    return failed == 0
+
+
+def search(query, limit=25):
+    """Return [(name, id, version)] from the winget source."""
+    rc, text = winget(["search", query, "--source", "winget", "--accept-source-agreements"])
+    lines = text.splitlines()
+    head = next((i for i, l in enumerate(lines) if l.startswith("Name") and "Id" in l), None)
+    if head is None:
+        return []
+    h = lines[head]
+    i_id, i_ver = h.index("Id"), h.index("Version")
+    out = []
+    for l in lines[head + 1:]:
+        if len(l) <= i_ver:
+            continue
+        ver = l[i_ver:].split()
+        out.append((l[:i_id].strip(), l[i_id:i_ver].strip(), ver[0] if ver else ""))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _get(url, timeout=12, limit=2_000_000):
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 kernel/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read(limit), r.headers.get("Content-Type", "")
+    except Exception:
+        return None, ""
+
+
+def _site_icons(domain):
+    """Icon URLs declared by the site's own homepage, best candidates first."""
+    from urllib.parse import urljoin
+    data, _ = _get(f"https://{domain}/", limit=400_000)
+    if not data:
+        return []
+    html = data.decode("utf-8", "replace")
+    found = []
+    for tag in re.findall(r"<link\b[^>]*>", html, re.I):
+        rel = re.search(r'rel=["\']([^"\']+)["\']', tag, re.I)
+        href = re.search(r'href=["\']([^"\']+)["\']', tag, re.I)
+        if not rel or not href or "icon" not in rel.group(1).lower():
+            continue
+        h = href.group(1)
+        if h.lower().split("?")[0].endswith(".svg"):
+            continue
+        sz = re.search(r'sizes=["\'](\d+)x', tag, re.I)
+        score = int(sz.group(1)) if sz else 0
+        if "apple-touch" in rel.group(1).lower():
+            score += 1000
+        found.append((score, urljoin(f"https://{domain}/", h)))
+    return [u for _, u in sorted(found, key=lambda x: -x[0])]
+
+
+def _valid_image(data, ctype):
+    return bool(data) and len(data) > 120 and ("image" in ctype or data[:4] in (b"\x89PNG", b"\x00\x00\x01\x00")
+                                               or data[:3] == b"GIF" or data[:2] == b"\xff\xd8")
+
+
+def icon_bytes(key, domain=None, google_only=False):
+    """Official icon for an app, cached on disk: the site's own icon first, then Google's favicon cache."""
+    os.makedirs(ICON_DIR, exist_ok=True)
+    path = os.path.join(ICON_DIR, re.sub(r"[^\w.+-]", "_", key) + ".v3.img")
+    if google_only and os.path.exists(path):
+        os.remove(path)
+    if os.path.exists(path):
+        with open(path, "rb") as f:
+            return f.read()
+    if not domain:
+        home = show(key).get("home")
+        domain = urlparse(home).hostname if home else None
+    guess = key.split(".")[0].lower() + ".com" if "." in key else None
+    if not domain:
+        domain = guess
+    if not domain:
+        return None
+    data = None
+    for url in ([] if google_only else _site_icons(domain)[:3]):
+        d, ct = _get(url)
+        if _valid_image(d, ct):
+            data = d
+            break
+    if not data:
+        d, _ = _get("https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL"
+                    f"&url=https://{domain}&size=128")
+        data = d if d and len(d) > 120 else None
+    if not data:
+        return None
+    with open(path, "wb") as f:
+        f.write(data)
+    return data
+
+
