@@ -2,6 +2,7 @@
 import ctypes
 import glob
 import os
+import re
 import shutil
 import subprocess
 import winreg
@@ -77,32 +78,57 @@ def t_telemetry(log):
     log("Telemetry set to minimum (Security level; Home/Pro may treat as Required).")
 
 
+WIDGETS_UI_SCRIPT = r'''
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
+$A=[Windows.Automation.AutomationElement]
+$want=%s
+Start-Process "ms-settings:taskbar"
+$win=$null; $sw=$null
+for($i=0;$i -lt 40 -and -not $sw;$i++){
+  Start-Sleep -Milliseconds 400
+  $win=$A::RootElement.FindFirst('Children',(New-Object Windows.Automation.PropertyCondition($A::NameProperty,'Settings')))
+  if($win){$sw=$win.FindFirst('Descendants',(New-Object Windows.Automation.PropertyCondition($A::AutomationIdProperty,'SystemSettings_DesktopTaskbar_Da_ToggleSwitch')))}
+}
+if(-not $sw){'NOTFOUND';exit}
+$p=$sw.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+$cur=[int]$p.Current.ToggleState
+if($cur -ne $want){$p.Toggle(); Start-Sleep -Milliseconds 800}
+"STATE=" + [int]$p.Current.ToggleState
+try{$win.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Close()}catch{}
+'''
+
+
+def _set_widgets_toggle(on, log):
+    out = run(["powershell", "-NoProfile", "-Command", WIDGETS_UI_SCRIPT % (1 if on else 0)])
+    if f"STATE={1 if on else 0}" not in out:
+        raise RuntimeError("Could not change the Widgets toggle in Settings > Taskbar.")
+    log(f"Widgets toggle turned {'on' if on else 'off'}.")
+
+
 def t_widgets(log):
-    # TaskbarDa is blocked by Windows' UCPD driver on current builds, so use the policy first.
-    adv = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    steps = [
-        ("policy", lambda: set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Dsh", "AllowNewsAndInterests", 0)),
-        ("TaskbarDa", lambda: set_reg(HKCU, adv, "TaskbarDa", 0)),
-        ("TaskbarMn", lambda: set_reg(HKCU, adv, "TaskbarMn", 0)),
-    ]
-    ok = False
-    for name, fn in steps:
-        try:
-            fn()
-            ok = True
-            log(f"{name}: set")
-        except OSError as e:
-            log(f"{name}: blocked ({e.strerror})")
-    out = run(["powershell", "-NoProfile", "-Command",
-               "Get-AppxPackage -AllUsers *WebExperience* | Remove-AppxPackage -AllUsers"])
-    log("Widgets package removed." if not out else f"Widgets package: {out[-200:]}")
-    run(["taskkill", "/f", "/im", "explorer.exe"])
-    subprocess.Popen(["explorer.exe"], creationflags=NOWIN)
-    log("Explorer restarted.")
+    _set_widgets_toggle(False, log)
 
 
 def t_power(log):
-    log(run(["powercfg", "/setactive", "SCHEME_MIN"]) or "High performance power plan activated.")
+    ultimate = "e9a42b02-d5df-448d-aa00-03f14749eb61"
+    result = subprocess.run(["powercfg", "/setactive", ultimate], capture_output=True, text=True,
+                            creationflags=NOWIN, shell=False)
+    if result.returncode == 0:
+        log("Ultimate Performance power plan activated.")
+        return
+    log("Ultimate Performance plan is not installed; creating it...")
+    duplicate = subprocess.run(["powercfg", "/duplicatescheme", ultimate],
+                               capture_output=True, text=True, creationflags=NOWIN, shell=False)
+    output = (duplicate.stdout + duplicate.stderr).strip()
+    match = re.search(r"([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})", output)
+    if duplicate.returncode != 0 or not match:
+        raise RuntimeError(f"Could not create Ultimate Performance plan: {output[-300:]}")
+    activated = subprocess.run(["powercfg", "/setactive", match.group(1)],
+                               capture_output=True, text=True, creationflags=NOWIN, shell=False)
+    if activated.returncode != 0:
+        output = (activated.stdout + activated.stderr).strip()
+        raise RuntimeError(f"Could not activate Ultimate Performance plan: {output[-300:]}")
+    log("Ultimate Performance power plan created and activated.")
 
 
 def t_time_format(log):
@@ -187,9 +213,13 @@ def t_sticky_keys(log):
 def t_nearby(log):
     cdp = r"Software\Microsoft\Windows\CurrentVersion\CDP"
     set_reg(HKCU, cdp, "CdpSessionUserAuthzPolicy", 0)
+    set_reg(HKCU, cdp, "NearShareChannelUserAuthzPolicy", 0)
     set_reg(HKCU, cdp, "NearShareChannelUxMode", 0)
     set_reg(HKCU, cdp, "RomeSdkChannelUserAuthzPolicy", 0)
-    log("Nearby sharing turned off.")
+    set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\Bluetooth", "AllowDiscoverableMode", 0)
+    set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\System", "EnableCdp", 0)
+    broadcast_setting("CDP")
+    log("Nearby sharing disabled for this user.")
 
 
 def t_core_isolation(log):
@@ -199,7 +229,9 @@ def t_core_isolation(log):
 
 
 def t_recall(log):
+    log("Recall: applying policy settings...")
     set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\WindowsAI", "DisableAIDataAnalysis", 1)
+    log("Recall: starting Windows feature removal (this may take a few minutes)...")
     out = run(["dism", "/online", "/disable-feature", "/featurename:Recall", "/norestart"])
     log("Recall policy set.")
     log(out[-300:] if out else "DISM returned no output.")
@@ -210,6 +242,171 @@ def t_game_mode(log):
     set_reg(HKCU, gb, "AutoGameModeEnabled", 1)
     set_reg(HKCU, gb, "AllowAutoGameMode", 1)
     log("Game Mode turned on.")
+
+
+def _reg(root, path, name, default=None):
+    try:
+        with winreg.OpenKey(root, path) as key:
+            return winreg.QueryValueEx(key, name)[0]
+    except OSError:
+        return default
+
+
+def _all_reg(root, path, names, expected):
+    return all(_reg(root, path, name) == expected for name in names)
+
+
+def _active_power():
+    return "e9a42b02-d5df-448d-aa00-03f14749eb61" in run(["powercfg", "/getactivescheme"]).lower()
+
+
+def _active_group_policy():
+    return not glob.glob(os.path.expandvars(
+        r"%SystemRoot%\servicing\Packages\Microsoft-Windows-GroupPolicy-*.mum"))
+
+
+def _active_widgets():
+    return _reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                "TaskbarDa") == 0
+
+
+ACTIVE_CHECKS = {
+    "t_bing": lambda: _reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Search",
+                           "BingSearchEnabled") == 0,
+    "t_ads": lambda: _all_reg(
+        HKCU, r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+        ("SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled",
+         "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled",
+         "SystemPaneSuggestionsEnabled", "SoftLandingEnabled", "SilentInstalledAppsEnabled"), 0)
+        and _reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo", "Enabled") == 0,
+    "t_telemetry": lambda: _reg(
+        HKLM, r"SOFTWARE\Policies\Microsoft\Windows\DataCollection", "AllowTelemetry") == 0,
+    "t_group_policy": _active_group_policy,
+    "t_power": _active_power,
+    "t_widgets": _active_widgets,
+    "t_time_format": lambda: _reg(HKCU, r"Control Panel\International", "sShortDate") == "MMM d, yyyy",
+    "t_end_task": lambda: _reg(
+        HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings",
+        "TaskbarEndTask") == 1,
+    "t_sounds": lambda: _reg(HKCU, r"AppEvents\Schemes", "") == ".None",
+    "t_mactype": lambda: bool(_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "MacType")),
+    "t_cursor": lambda: _reg(HKCU, r"Control Panel\Cursors", "") == "Big Sur",
+    "t_notepad": lambda: _reg(HKLM, r"SOFTWARE\Policies\WindowsNotepad", "DisableAIFeatures") == 1,
+    "t_mouse_accel": lambda: _all_reg(HKCU, r"Control Panel\Mouse",
+                                       ("MouseSpeed", "MouseThreshold1", "MouseThreshold2"), "0"),
+    "t_sticky_keys": lambda: _reg(HKCU, r"Control Panel\Accessibility\StickyKeys", "Flags") == "506",
+    "t_game_mode": lambda: _all_reg(HKCU, r"Software\Microsoft\GameBar",
+                                     ("AutoGameModeEnabled", "AllowAutoGameMode"), 1),
+    "t_smart_app_control": lambda: _reg(
+        HKLM, r"SYSTEM\CurrentControlSet\Control\CI\Policy",
+        "VerifiedAndReputablePolicyState") == 0,
+    "t_core_isolation": lambda: _reg(
+        HKLM, r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
+        "Enabled") == 0,
+    "t_nearby": lambda: _all_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\CDP",
+                                 ("CdpSessionUserAuthzPolicy", "NearShareChannelUserAuthzPolicy",
+                                  "NearShareChannelUxMode", "RomeSdkChannelUserAuthzPolicy"), 0)
+        and _reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\Bluetooth",
+                 "AllowDiscoverableMode") == 0
+        and _reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\System", "EnableCdp") == 0,
+    "t_recall": lambda: _reg(
+        HKLM, r"SOFTWARE\Policies\Microsoft\Windows\WindowsAI", "DisableAIDataAnalysis") == 1,
+}
+
+
+def is_active(fn):
+    checker = ACTIVE_CHECKS.get(fn.__name__)
+    if checker is None:
+        return False
+    try:
+        return bool(checker())
+    except OSError:
+        return False
+
+
+def _delete_reg(root, path, name):
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, name)
+    except FileNotFoundError:
+        pass
+
+
+def revert_tweak(fn, log):
+    name = fn.__name__
+    if name == "t_bing":
+        set_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Search", "BingSearchEnabled", 1)
+    elif name == "t_ads":
+        path = r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        for value in ("SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled",
+                      "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled",
+                      "SystemPaneSuggestionsEnabled", "SoftLandingEnabled",
+                      "SilentInstalledAppsEnabled"):
+            set_reg(HKCU, path, value, 1)
+        set_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo", "Enabled", 1)
+    elif name == "t_telemetry":
+        set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\DataCollection", "AllowTelemetry", 1)
+    elif name == "t_power":
+        out = run(["powercfg", "/setactive", "SCHEME_BALANCED"])
+        if out and "error" in out.lower():
+            raise RuntimeError(out[-300:])
+    elif name == "t_widgets":
+        _set_widgets_toggle(True, log)
+    elif name == "t_time_format":
+        set_str(HKCU, r"Control Panel\International", "sShortDate", "M/d/yyyy")
+        broadcast_setting("intl")
+    elif name == "t_end_task":
+        set_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+                r"\TaskbarDeveloperSettings", "TaskbarEndTask", 0)
+    elif name == "t_sounds":
+        set_str(HKCU, r"AppEvents\Schemes", "", ".Default")
+    elif name == "t_mactype":
+        _delete_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "MacType")
+        run(["taskkill", "/f", "/im", "MacTray.exe"])
+    elif name == "t_cursor":
+        set_str(HKCU, r"Control Panel\Cursors", "", "Windows Default")
+        set_reg(HKCU, r"Control Panel\Cursors", "Scheme Source", 2)
+        ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 3)
+    elif name == "t_notepad":
+        _delete_reg(HKLM, r"SOFTWARE\Policies\WindowsNotepad", "DisableAIFeatures")
+    elif name == "t_mouse_accel":
+        for value, data in (("MouseSpeed", "1"), ("MouseThreshold1", "6"), ("MouseThreshold2", "10")):
+            set_str(HKCU, r"Control Panel\Mouse", value, data)
+        params = (ctypes.c_int * 3)(1, 6, 10)
+        ctypes.windll.user32.SystemParametersInfoW(0x0004, 0, params, 3)
+    elif name == "t_sticky_keys":
+        key = r"Control Panel\Accessibility"
+        set_str(HKCU, key + r"\StickyKeys", "Flags", "510")
+        set_str(HKCU, key + r"\ToggleKeys", "Flags", "58")
+        set_str(HKCU, key + r"\Keyboard Response", "Flags", "126")
+    elif name == "t_game_mode":
+        set_reg(HKCU, r"Software\Microsoft\GameBar", "AutoGameModeEnabled", 0)
+        set_reg(HKCU, r"Software\Microsoft\GameBar", "AllowAutoGameMode", 0)
+    elif name == "t_smart_app_control":
+        _delete_reg(HKLM, r"SYSTEM\CurrentControlSet\Control\CI\Policy",
+                    "VerifiedAndReputablePolicyState")
+    elif name == "t_core_isolation":
+        set_reg(HKLM, r"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios"
+                r"\HypervisorEnforcedCodeIntegrity", "Enabled", 1)
+    elif name == "t_nearby":
+        cdp = r"Software\Microsoft\Windows\CurrentVersion\CDP"
+        for value in ("CdpSessionUserAuthzPolicy", "NearShareChannelUserAuthzPolicy",
+                      "NearShareChannelUxMode", "RomeSdkChannelUserAuthzPolicy"):
+            _delete_reg(HKCU, cdp, value)
+        _delete_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\Bluetooth", "AllowDiscoverableMode")
+        _delete_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\System", "EnableCdp")
+        broadcast_setting("CDP")
+    elif name == "t_recall":
+        _delete_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\WindowsAI",
+                    "DisableAIDataAnalysis")
+        out = run(["dism", "/online", "/enable-feature", "/featurename:Recall", "/norestart"])
+        if out and "error" in out.lower():
+            raise RuntimeError(out[-300:])
+    elif name in {"t_temp", "t_group_policy", "t_nvidia_profile"}:
+        raise RuntimeError("This action does not have a safe automatic Windows default to restore.")
+    else:
+        raise RuntimeError(f"No revert handler is defined for {name}.")
+    log(f"{fn.__name__} reverted to its Windows default.")
 
 
 MACTYPE_PROFILE = "XMac.LCD.HotShift@XHei(iOS^MacOS)"
@@ -373,7 +570,7 @@ def t_nvidia_profile(log):
     log("NVIDIA profile imported.")
 
 # Run-once actions shown as buttons instead of toggles
-ONE_SHOT = {"t_temp", "t_group_policy", "t_mactype", "t_notepad", "t_cursor", "t_nvidia_profile"}
+ONE_SHOT = {"t_temp", "t_group_policy", "t_nvidia_profile"}
 
 # (section, title, description, function)
 TASKS = [
@@ -382,13 +579,13 @@ TASKS = [
     ("Privacy", "Minimize telemetry", "Reduce diagnostic data collection", t_telemetry),
     ("System", "Clean temp files", "Temp, Prefetch and Recycle Bin", t_temp),
     ("System", "Group Policy Editor", "Install gpedit on Windows Home", t_group_policy),
-    ("System", "High performance", "Activate the maximum performance power plan", t_power),
+    ("Gaming", "Ultimate performance", "Activate the maximum performance power plan", t_power),
     ("Appearance", "Hide Widgets & Chat", "Remove the taskbar buttons", t_widgets),
     ("Appearance", "Taskbar date format", "Show the date as MMM d, yyyy (e.g. Dec 31, 2030)", t_time_format),
     ("Appearance", "Enable End Task in taskbar", "Adds 'End task' to the right-click menu of taskbar apps", t_end_task),
     ("Appearance", "Disable Windows sounds", "Sound scheme to 'No Sounds' and no startup chime", t_sounds),
     ("Appearance", "Apply MacType in system tray", "Use the XMac LCD HotShift profile (MacType must be installed)", t_mactype),
-    ("Appearance", "Big Sur cursors", "Install the Big Sur cursor pack and apply it as your cursor scheme", t_cursor),
+    ("Appearance", "Apply Big Sur cursor", "Install the Big Sur cursor pack and apply it as your cursor scheme", t_cursor),
     ("Gaming", "NVIDIA profile", "Import your saved NVIDIA Profile Inspector settings", t_nvidia_profile),
     ("Apps", "Notepad settings", "Consolas Regular 14 and Notepad's Copilot/AI turned off", t_notepad),
     ("Input", "Disable enhanced mouse precision", "Turns off pointer acceleration for consistent aim", t_mouse_accel),

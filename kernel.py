@@ -26,7 +26,7 @@ from shiboken6 import isValid
 
 import apps
 from jobs import ACTIVE, Job, JobManager
-from tweaks import TASKS, ONE_SHOT
+from tweaks import TASKS, ONE_SHOT, is_active, revert_tweak
 
 BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
 
@@ -460,9 +460,9 @@ class Toggle(QWidget):
         super().__init__()
         self.on = False
         self._pos = 0.0
-        self.setFixedSize(46, 24)
+        self.setFixedSize(46, 26)
         self.anim = QPropertyAnimation(self, b"progress", self)
-        self.anim.setDuration(160)
+        self.anim.setDuration(240)
         self.anim.setEasingCurve(QEasingCurve.OutCubic)
 
     def get_pos(self):
@@ -492,10 +492,20 @@ class Toggle(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
         t = self._pos
-        p.setBrush(QColor(*(int(38 + 217 * t),) * 3))
-        p.drawRoundedRect(QRectF(0, 0, 46, 24), 12, 12)
-        p.setBrush(QColor(*(int(122 - 122 * t),) * 3))
-        p.drawEllipse(QRectF(4 + 22 * t, 4, 16, 16))
+        track = QColor(int(52 + 203 * t), int(52 + 203 * t), int(56 + 199 * t))
+        knob = QColor(int(142 - 142 * t), int(142 - 142 * t), int(147 - 147 * t))
+        p.setBrush(track)
+        p.drawRoundedRect(QRectF(0, 0, 46, 26), 13, 13)
+        p.setPen(QColor(105, 105, 110) if t < 0.5 else QColor(70, 70, 74))
+        f = QFont(self.font())
+        f.setPixelSize(10)
+        f.setWeight(QFont.Bold)
+        p.setFont(f)
+        p.drawText(QRectF(6, 0, 12, 26), Qt.AlignCenter, "O")
+        p.drawText(QRectF(28, 0, 12, 26), Qt.AlignCenter, "I")
+        p.setBrush(knob)
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QRectF(3 + 20 * t, 3, 20, 20))
 
 
 # ---------- rows ----------
@@ -571,27 +581,62 @@ class Row(HoverFrame):
 
 
 class TaskRow(Row):
-    def __init__(self, title, subtitle):
+    def __init__(self, title, subtitle, on_apply=None, on_revert=None):
         super().__init__(title, subtitle)
         self.setCursor(Qt.PointingHandCursor)
+        self.apply = None
+        self.revert = None
+        if on_apply:
+            self.apply = Button("Apply")
+            self.apply.setCursor(Qt.PointingHandCursor)
+            self.apply.setMinimumWidth(96)
+            self.apply.clicked.connect(on_apply)
+            self.right.addWidget(self.apply)
+        if on_revert:
+            self.revert = Button("Revert")
+            self.revert.setCursor(Qt.PointingHandCursor)
+            self.revert.setMinimumWidth(96)
+            self.revert.clicked.connect(on_revert)
+            self.right.addWidget(self.revert)
         self.toggle = Toggle()
         self.right.addWidget(self.toggle)
 
+    def set_active(self, active):
+        if self.apply is None:
+            return
+        self.apply.setText("Applied" if active else "Apply")
+        self.apply.setEnabled(not active)
+        self.revert.setEnabled(active)
+        self.toggle.setEnabled(not active)
+        if active:
+            self.toggle.set_quiet(False)
+
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
+        if e.button() == Qt.LeftButton and self.toggle.isEnabled():
             self.toggle.set(not self.toggle.on)
 
 
 class RunRow(Row):
     """Single-use action: one click runs it."""
 
-    def __init__(self, title, subtitle, on_run):
+    def __init__(self, title, subtitle, on_run, on_revert, active=False):
         super().__init__(title, subtitle)
         self.b = Button("Run")
         self.b.setCursor(Qt.PointingHandCursor)
         self.b.setMinimumWidth(116)
         self.b.clicked.connect(on_run)
         self.right.addWidget(self.b)
+        self.revert = Button("Revert")
+        self.revert.setCursor(Qt.PointingHandCursor)
+        self.revert.setMinimumWidth(116)
+        self.revert.clicked.connect(on_revert)
+        self.right.addWidget(self.revert)
+        self.set_active(active)
+
+    def set_active(self, active):
+        self.b.setText("Applied" if active else "Run")
+        self.b.setEnabled(not active)
+        self.revert.setEnabled(active)
 
 
 class ActionRow(Row):
@@ -784,32 +829,85 @@ class SearchDock(QWidget):
         super().__init__(page.parentWidget())
         self.page = page
         self.edit = edit
+        self._focus = 0.0
+        self._base_rect = QRect()
+        self.backdrop = QPixmap()
+        self.focus_anim = QPropertyAnimation(self, b"focusProgress", self)
+        self.focus_anim.setDuration(360)
+        self.focus_anim.setEasingCurve(
+            QEasingCurve.fromCubicBezier(QPointF(0.22, 0.1), QPointF(0.25, 1.0)))
         edit.setParent(self)
         edit.setFrame(False)
         edit.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0 22px; "
                            "font-size: 18px; selection-background-color: #444444; }")
         self.tick = QTimer(self)
-        self.tick.setInterval(70)
+        self.tick.setInterval(250)
         self.tick.timeout.connect(self.refresh)
         self.tick.start()
-        page.verticalScrollBar().valueChanged.connect(self.update)
+        page.verticalScrollBar().valueChanged.connect(self.capture_backdrop)
+        app = QApplication.instance()
+        if app:
+            app.focusChanged.connect(self.focus_changed)
         self.edit.installEventFilter(self)
 
-    def eventFilter(self, o, e):
-        if e.type() in (QEvent.FocusIn, QEvent.FocusOut):
-            self.update()
+    def focus_changed(self, old, new):
+        if old is self.edit or new is self.edit:
+            self.animate_focus(new is self.edit)
+
+    def eventFilter(self, obj, event):
+        if obj is self.edit and event.type() == QEvent.MouseButtonPress:
+            self.edit.setFocus(Qt.MouseFocusReason)
+            self.animate_focus(True)
         return False
 
+    def animate_focus(self, focused):
+        self.focus_anim.stop()
+        self.focus_anim.setStartValue(round(self._focus * 100))
+        self.focus_anim.setEndValue(100 if focused else 0)
+        self.focus_anim.start()
+
+    def get_focus_progress(self):
+        return round(self._focus * 100)
+
+    def set_focus_progress(self, value):
+        self._focus = value / 100.0
+        self.update_geometry()
+        self.update()
+
+    focusProgress = Property(int, get_focus_progress, set_focus_progress)
+
+    def update_geometry(self):
+        if self._base_rect.isNull():
+            return
+        scale = 1.0 + 0.02 * self._focus
+        width = round(self._base_rect.width() * scale)
+        height = round(self._base_rect.height() * scale)
+        center = self._base_rect.center()
+        self.setGeometry(QRect(center.x() - width // 2, center.y() - height // 2, width, height))
+        self.edit.setGeometry(self.rect())
+
     def refresh(self):
-        if self.isVisible() and self.window().isActiveWindow():
+        if self.isVisible() and self._focus in (0.0, 1.0):
+            self.capture_backdrop()
+
+    def capture_backdrop(self):
+        if not self.isVisible() or self.width() <= 0:
+            return
+        top_left = self.page.mapFrom(self.parentWidget(), self.geometry().topLeft())
+        shot = self.page.grab(QRect(top_left, self.size()))
+        if not shot.isNull():
+            shot.setDevicePixelRatio(1.0)
+            self.backdrop = blurred(shot, radius=22)
             self.update()
 
     def place(self):
         host = self.parentWidget()
         w = min(760, host.width() - 40)
-        self.setGeometry(20, host.height() - self.H - self.GAP, w, self.H)
-        self.edit.setGeometry(0, 0, w, self.H)
+        self._base_rect = QRect(20, host.height() - self.H - self.GAP, w, self.H)
+        self.update_geometry()
+        self.update()
         self.raise_()
+        QTimer.singleShot(0, self.capture_backdrop)
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -818,19 +916,14 @@ class SearchDock(QWidget):
         path = QPainterPath()
         path.addRoundedRect(r, 16, 16)
         p.setClipPath(path)
-        g = self.geometry()
-        shot = self.page.viewport().grab(QRect(g.x(), g.y(), g.width(), g.height()))
-        shot.setDevicePixelRatio(1.0)
-        s = 8
-        small = shot.scaled(max(shot.width() // s, 1), max(shot.height() // s, 1), Qt.IgnoreAspectRatio,
-                            Qt.SmoothTransformation)
-        small = small.scaled(max(small.width() // 2, 1), max(small.height() // 2, 1), Qt.IgnoreAspectRatio,
-                             Qt.SmoothTransformation)
-        p.drawPixmap(QRectF(self.rect()), small, QRectF(small.rect()))
-        p.fillPath(path, QColor(14, 14, 14, 165))
+        p.fillPath(path, QColor(14, 14, 14, 235))
+        if not self.backdrop.isNull():
+            p.drawPixmap(QRectF(self.rect()), self.backdrop, QRectF(self.backdrop.rect()))
+            p.fillPath(path, QColor(14, 14, 14, 125))
         p.setClipping(False)
-        a = 70 if self.edit.hasFocus() else 34
-        p.setPen(QPen(QColor(255, 255, 255, a), 1))
+        a = round(32 + 20 * self._focus)
+        width = 1.0 + 0.1 * self._focus
+        p.setPen(QPen(QColor(255, 255, 255, a), width))
         p.drawPath(path)
 
 
@@ -915,6 +1008,7 @@ class Kernel(QWidget):
         rv.addWidget(self.stack, 1)
 
         self.rows = []
+        self.action_rows = []
         self.stack.addWidget(self.build_tweaks())
         self.stack.addWidget(self.build_apps())
         self.stack.addWidget(self.build_activity())
@@ -1200,22 +1294,43 @@ class Kernel(QWidget):
 
     def build_tweaks(self):
         page = Page("Tweaks")
-        INLINE = {"Gaming"}
-        toggles = [t for t in TASKS if t[3].__name__ not in ONE_SHOT]
-        run_row = lambda name, fn: RunRow(name, next(t[2] for t in TASKS if t[3] is fn),
-                                          lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]))
-        for cat in dict.fromkeys(t[0] for t in toggles + [t for t in TASKS if t[0] in INLINE]):
+        SECTION_ORDER = ("Appearance", "System", "Gaming")
+        CATEGORY_MAP = {
+            "Privacy": "System",
+            "Apps": "System",
+            "Input": "System",
+            "Security": "System",
+        }
+        INLINE = {"Appearance", "Gaming"}
+        visible = [(CATEGORY_MAP.get(cat, cat), name, desc, fn)
+                   for cat, name, desc, fn in TASKS]
+        toggles = [t for t in visible if t[3].__name__ not in ONE_SHOT]
+        def run_row(name, fn):
+            row = RunRow(name, next(t[2] for t in TASKS if t[3] is fn),
+                         lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
+                         lambda _=False, n=name, f=fn: self.run_reverts([(n, f)]),
+                         is_active(fn))
+            self.action_rows.append((row, fn))
+            return row
+        for cat in SECTION_ORDER:
             page.section(cat)
             for _, name, desc, fn in (t for t in toggles if t[0] == cat):
-                r = TaskRow(name, desc)
+                r = TaskRow(
+                    name, desc,
+                    lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
+                    lambda _=False, n=name, f=fn: self.run_reverts([(n, f)]))
+                r.set_active(is_active(fn))
                 self.rows.append((r, fn.__name__, name, fn))
                 page.add(r)
-            if cat in INLINE:
-                for _, name, desc, fn in (t for t in TASKS if t[0] == cat and t[3].__name__ in ONE_SHOT):
+            action_names = ONE_SHOT if cat in INLINE else set()
+            if action_names:
+                for _, name, desc, fn in (t for t in visible if t[0] == cat and t[3].__name__ in action_names):
                     page.add(run_row(name, fn))
         page.section("Quick actions")
-        for _, name, desc, fn in (t for t in TASKS if t[3].__name__ in ONE_SHOT and t[0] not in INLINE):
-            page.add(RunRow(name, desc, lambda _=False, n=name, f=fn: self.run_tasks([(n, f)])))
+        for _, name, desc, fn in (t for t in TASKS
+                                  if t[3].__name__ in ONE_SHOT
+                                  and t[0] not in INLINE):
+            page.add(run_row(name, fn))
         page.col.addStretch()
         return page
 
@@ -1299,8 +1414,17 @@ class Kernel(QWidget):
         t.setObjectName("title")
         pl.addWidget(t)
         pl.addSpacing(16)
+        bar = QHBoxLayout()
+        bar.addStretch()
+        clear = Button("Clear")
+        clear.setCursor(Qt.PointingHandCursor)
+        clear.setMinimumWidth(96)
+        bar.addWidget(clear)
+        pl.addLayout(bar)
+        pl.addSpacing(8)
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
+        clear.clicked.connect(self.log.clear)
         SmoothScroller(self.log)
         pl.addWidget(self.log, 1)
         return page
@@ -1429,6 +1553,12 @@ class Kernel(QWidget):
         self.run_tasks(sel)
 
     def run_tasks(self, sel):
+        self.run_operations(sel, False)
+
+    def run_reverts(self, sel):
+        self.run_operations(sel, True)
+
+    def run_operations(self, sel, reverting):
         if not sel or (self.tweak_job and self.tweak_job.active):
             return
         self.btn.setEnabled(False)
@@ -1436,11 +1566,20 @@ class Kernel(QWidget):
 
         def work(job):
             for name, fn in sel:
-                job.log(f"== {name}")
+                job.log(f"== {'Revert ' if reverting else ''}{name}")
                 try:
-                    fn(job.log)
+                    if reverting:
+                        revert_tweak(fn, job.log)
+                    elif is_active(fn):
+                        job.log(f"Skipped {name}: already active.")
+                    else:
+                        fn(job.log)
                 except Exception as e:
-                    job.log(f"FAILED: {e}")
+                    tb = e.__traceback__
+                    while tb.tb_next:
+                        tb = tb.tb_next
+                    job.log(f"FAILED: {e} (at {os.path.basename(tb.tb_frame.f_code.co_filename)}:"
+                            f"{tb.tb_lineno} in {tb.tb_frame.f_code.co_name})")
             job.log("Done.")
             return True
         self.tweak_job = Job("Tweaks", "task", fn=work, hidden=True)
@@ -1450,6 +1589,10 @@ class Kernel(QWidget):
     def tweaks_changed(self):
         if self.tweak_job and not self.tweak_job.active:
             self.btn.setEnabled(True)
+            for row, _, _, fn in self.rows:
+                row.set_active(is_active(fn))
+            for row, fn in self.action_rows:
+                row.set_active(is_active(fn))
 
 
 if __name__ == "__main__":
