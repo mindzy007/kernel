@@ -745,7 +745,7 @@ TASKS = [
     ("Privacy", "Remove Bing from search", "Stop web results in Start menu search", t_bing),
     ("Privacy", "Disable ads & suggestions", "Tips, suggested apps and advertising ID", t_ads),
     ("Privacy", "Minimize telemetry", "Reduce diagnostic data collection", t_telemetry),
-    ("System", "Clean temp files", "Temp, Prefetch and Recycle Bin", t_temp),
+    ("Storage", "Clean temp files", "Temp, Prefetch and Recycle Bin", t_temp),
     ("System", "Group Policy Editor", "Install gpedit on Windows Home", t_group_policy),
     ("Performance", "Ultimate performance", "Activate the maximum performance power plan", t_power),
     ("Appearance", "Hide Widgets & Chat", "Remove the taskbar buttons", t_widgets),

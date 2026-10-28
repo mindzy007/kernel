@@ -26,6 +26,7 @@ from shiboken6 import isValid
 
 import apps
 import specs
+import storage
 from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, is_active, revert_tweak
 
@@ -55,8 +56,8 @@ QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 """
 
-TWEAKS, APPS, GAMING, SPECS, ACTIVITY, SETTINGS = range(6)
-GLYPH = {"tweaks": "\uE9E9", "apps": "\uF0E2", "gaming": "\uE7FC", "specs": "\uE770", "downloads": "\uE896", "activity": "\uE9D9",
+TWEAKS, APPS, GAMING, STORAGE, SPECS, ACTIVITY, SETTINGS = range(7)
+GLYPH = {"storage": "\uEDA2", "tweaks": "\uE9E9", "apps": "\uF0E2", "gaming": "\uE7FC", "specs": "\uE770", "downloads": "\uE896", "activity": "\uE9D9",
          "settings": "\uE713"}
 
 
@@ -1048,6 +1049,8 @@ class Kernel(QWidget):
     found = Signal(list)
     icon_ready = Signal(str, QImage)
     specs_ready = Signal(list)
+    drives_ready = Signal(list)
+    storage_ready = Signal(str, dict)
 
     def __init__(self):
         super().__init__()
@@ -1107,6 +1110,7 @@ class Kernel(QWidget):
         self.stack.addWidget(self.build_tweaks())
         self.stack.addWidget(self.build_apps())
         self.stack.addWidget(self.build_gaming())
+        self.stack.addWidget(self.build_storage())
         self.stack.addWidget(self.build_specs())
         self.stack.addWidget(self.build_activity())
         self.stack.addWidget(self.build_settings())
@@ -1115,6 +1119,7 @@ class Kernel(QWidget):
         group = QButtonGroup(self)
         for text, idx, g in (("Tweaks", TWEAKS, "tweaks"), ("Applications", APPS, "apps"),
                                      ("Performance", GAMING, "gaming"),
+                             ("Storage", STORAGE, "storage"),
                              ("Specifications", SPECS, "specs"), ("Activity", ACTIVITY, "activity")):
             sl.addWidget(self.nav(text, idx, g, group))
         sl.addStretch()
@@ -1338,7 +1343,7 @@ class Kernel(QWidget):
             return
         self.finish_anim()
         self.stack.setCurrentIndex(index)
-        self.footer.setVisible(index in (TWEAKS, GAMING))
+        self.footer.setVisible(index in (TWEAKS, GAMING, STORAGE))
         page = self.stack.currentWidget()
         fx = QGraphicsOpacityEffect(page)
         fx.setOpacity(0.0)
@@ -1440,17 +1445,11 @@ class Kernel(QWidget):
             "Input": "System",
             "Security": "System",
         }
-        INLINE = {"Appearance", "Performance"}
+        INLINE = {"Appearance", "Performance", "System"}
         visible = [(CATEGORY_MAP.get(cat, cat), name, desc, fn)
                    for cat, name, desc, fn in TASKS]
         toggles = [t for t in visible if t[3].__name__ not in ONE_SHOT]
-        def run_row(name, fn):
-            row = RunRow(name, next(t[2] for t in TASKS if t[3] is fn),
-                         lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
-                         lambda _=False, n=name, f=fn: self.run_reverts([(n, f)]),
-                         is_active(fn))
-            self.action_rows.append((row, fn))
-            return row
+        run_row = self.run_row
         for cat in SECTION_ORDER:
             page.section(cat)
             for _, name, desc, fn in (t for t in toggles if t[0] == cat):
@@ -1465,14 +1464,123 @@ class Kernel(QWidget):
             if action_names:
                 for _, name, desc, fn in (t for t in visible if t[0] == cat and t[3].__name__ in action_names):
                     page.add(run_row(name, fn))
-        if title == "Tweaks":
-            page.section("Quick actions")
-            for _, name, desc, fn in (t for t in TASKS
-                                      if t[3].__name__ in ONE_SHOT
-                                      and t[0] not in INLINE):
-                page.add(run_row(name, fn))
         page.col.addStretch()
         return page
+
+    def run_row(self, name, fn):
+        row = RunRow(name, next(t[2] for t in TASKS if t[3] is fn),
+                     lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
+                     lambda _=False, n=name, f=fn: self.run_reverts([(n, f)]),
+                     is_active(fn))
+        self.action_rows.append((row, fn))
+        return row
+
+    def build_storage(self):
+        page = Page("Storage")
+        page.section("Quick actions")
+        for cat, name, desc, fn in TASKS:
+            if cat == "Storage":
+                page.add(self.run_row(name, fn))
+        page.section("Devices and drives")
+        self.drive_box = QVBoxLayout()
+        self.drive_box.setSpacing(2)
+        page.col.addLayout(self.drive_box)
+        page.section("What's taking up space")
+        self.usage_hint = QLabel("Pick a drive and press Analyze.")
+        self.usage_hint.setObjectName("muted")
+        page.col.addWidget(self.usage_hint)
+        self.usage_box = QVBoxLayout()
+        self.usage_box.setSpacing(2)
+        page.col.addLayout(self.usage_box)
+        page.col.addStretch()
+        self.storage_ready.connect(self.show_usage)
+        self.drives_ready.connect(self.show_drives)
+        self.refresh_drives()
+        return page
+
+    def refresh_drives(self):
+        threading.Thread(target=lambda: self.drives_ready.emit(storage.drives()), daemon=True).start()
+
+    def show_drives(self, items):
+        while self.drive_box.count():
+            w = self.drive_box.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        for root, label, free, total in items:
+            used = total - free
+            row = Row(f"{label} ({root[:2]})",
+                      f"{apps.human(free)} free of {apps.human(total)}")
+            bar = Bar()
+            bar.set_value(used / total if total else 0)
+            bar.setMinimumWidth(220)
+            row.right.addWidget(bar)
+            b = Button("Analyze")
+            b.setCursor(Qt.PointingHandCursor)
+            b.setMinimumWidth(116)
+            b.clicked.connect(lambda _=False, r=root, btn=b: self.analyze_drive(r, btn))
+            row.right.addWidget(b)
+            self.drive_box.addWidget(row)
+
+    def analyze_drive(self, root, btn):
+        btn.setEnabled(False)
+        btn.setText("Scanning...")
+        self.usage_hint.setText(f"Scanning {root} - this can take a minute.")
+        self.usage_hint.show()
+
+        def work():
+            try:
+                res = storage.analyze(root)
+            except Exception:
+                res = {"root": [], "user": []}
+            self.storage_ready.emit(root, res)
+        threading.Thread(target=work, daemon=True).start()
+        self._analyze_btn = btn
+
+    def show_usage(self, root, res):
+        btn = getattr(self, "_analyze_btn", None)
+        if btn is not None and isValid(btn):
+            btn.setEnabled(True)
+            btn.setText("Analyze")
+        while self.usage_box.count():
+            w = self.usage_box.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self.usage_hint.hide()
+        groups = (("On " + root, res["root"]), ("In your user folder", res["user"]))
+        for heading, items in groups:
+            if not items:
+                continue
+            h = QLabel(heading)
+            h.setObjectName("section")
+            self.usage_box.addSpacing(14)
+            self.usage_box.addWidget(h)
+            top = items[0][1] or 1
+            for path, size, is_dir in items:
+                row = Row(os.path.basename(path.rstrip("\\")) or path, path)
+                row.sub.setWordWrap(True)
+                row.sub.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                sz = QLabel(apps.human(size))
+                sz.setStyleSheet("font-size: 15px;")
+                bar = Bar()
+                bar.set_value(size / top)
+                bar.setFixedWidth(120)
+                row.right.addWidget(bar)
+                row.right.addWidget(sz)
+                b = Button("Show")
+                b.setCursor(Qt.PointingHandCursor)
+                b.setMinimumWidth(84)
+                b.clicked.connect(lambda _=False, p=path, d=is_dir: self.show_path(p, d))
+                row.right.addWidget(b)
+                self.usage_box.addWidget(row)
+        if not self.usage_box.count():
+            self.usage_hint.setText("Nothing could be read from this drive.")
+            self.usage_hint.show()
+
+    def show_path(self, path, is_dir):
+        if is_dir:
+            os.startfile(path)
+        else:
+            subprocess.Popen(f'explorer /select,"{path}"')
 
     def app_actions(self, pkg_id):
         def dl(job):
