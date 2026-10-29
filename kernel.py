@@ -21,7 +21,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
     QComboBox, QGridLayout, QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QStackedWidget, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QStackedWidget, QSizePolicy, QVBoxLayout, QWidget,
 )
 from shiboken6 import isValid
 
@@ -744,6 +744,7 @@ class HoverFrame(QFrame):
     """Row background that fades in on hover."""
     def __init__(self):
         super().__init__()
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self._h = 0.0
         self.a_h = QPropertyAnimation(self, b"hl", self)
         self.a_h.setEasingCurve(QEasingCurve.OutCubic)
@@ -2199,8 +2200,8 @@ class Kernel(QWidget):
             more.clicked.connect(self.toggle_apps)
             holder = QHBoxLayout()
             holder.setContentsMargins(16, 8, 0, 0)
-            holder.addWidget(more)
             holder.addStretch()
+            holder.addWidget(more)
             wrap = QWidget()
             wrap.setLayout(holder)
             self.apps_box.addWidget(wrap)
