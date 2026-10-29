@@ -62,6 +62,16 @@ QScrollBar::handle:vertical {{ background: #262626; border-radius: 3px; min-heig
 QScrollBar::handle:vertical:hover {{ background: #363636; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QComboBox {{ background: #0f0f0f; border: 1px solid #222222; border-radius: 11px; padding: 10px 40px 10px 18px;
+            font-size: 15px; min-width: 120px; }}
+QComboBox:hover {{ background: #1a1a1a; }}
+QComboBox:on {{ border-color: #4a4a4a; }}
+QComboBox::drop-down {{ border: none; width: 34px; subcontrol-origin: padding; subcontrol-position: center right; }}
+QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
+QComboBox QAbstractItemView {{ background: #101010; border: 1px solid #2a2a2a; border-radius: 10px; padding: 4px;
+                              outline: none; selection-background-color: #242424; }}
+QComboBox QAbstractItemView::item {{ min-height: 34px; padding-left: 12px; border-radius: 8px; }}
+QComboBox QAbstractItemView::item:selected {{ background: #242424; }}
 """
 
 TWEAKS, APPS, GAMING, STORAGE, SPECS, ACTIVITY, SETTINGS = range(7)
@@ -866,6 +876,7 @@ class Row(HoverFrame):
         lay.addLayout(text, 1)
         self.right = QHBoxLayout()
         self.right.setSpacing(8)
+        self.right.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addLayout(self.right)
 
 
@@ -944,6 +955,9 @@ class RunRow(Row):
         self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.revert.clicked.connect(on_revert)
         self.right.addWidget(self.revert)
+        spacer = QWidget()
+        spacer.setFixedSize(46, 26)
+        self.right.addWidget(spacer)
         self.set_active(active)
 
     def set_active(self, active):
@@ -1243,7 +1257,7 @@ class SearchDock(QWidget):
 
     def place(self):
         host = self.parentWidget()
-        w = min(760, host.width() - 40)
+        w = max(host.width() - 40, 0)
         self._base_rect = QRect(20, host.height() - self.H - self.GAP, w, self.H)
         self.update_geometry()
         self.update()
@@ -1292,6 +1306,42 @@ def blurred(pm, radius=18):
 
 # ---------- main window ----------
 
+class FluentCombo(QComboBox):
+    def __init__(self):
+        super().__init__()
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedWidth(190)
+        popup = self.view().window()
+        popup.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        popup.setAttribute(Qt.WA_TranslucentBackground)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        f = QFont("Segoe Fluent Icons")
+        f.setPixelSize(12)
+        p.setFont(f)
+        p.setPen(QColor(MUTED))
+        p.drawText(self.rect().adjusted(0, 0, -14, 0), Qt.AlignRight | Qt.AlignVCenter, "\uE70D")
+
+
+class SideGrip(QWidget):
+    """Thin drag handle that resizes the sidebar."""
+    MIN, MAX = 150, 420
+
+    def __init__(self, side):
+        super().__init__()
+        self.side = side
+        self.setFixedWidth(5)
+        self.setCursor(Qt.SizeHorCursor)
+
+    def mouseMoveEvent(self, e):
+        if e.buttons() & Qt.LeftButton:
+            x = self.side.mapFromGlobal(e.globalPosition().toPoint()).x()
+            self.side.setFixedWidth(max(self.MIN, min(self.MAX, x)))
+
+
 class Kernel(QWidget):
     logged = Signal(str)
     found = Signal(list)
@@ -1308,6 +1358,8 @@ class Kernel(QWidget):
     def __init__(self):
         super().__init__()
         self.cfg = Config()
+        self.prefetch = self.scan_source = None
+        self.start_storage_prefetch()
         SmoothScroller.on = self.cfg.smooth_scroll
         self.jobs = JobManager(os.path.join(self.cfg.dir, "downloads.json"))
         self.icons, self.icon_widgets, self.icon_pending = {}, {}, set()
@@ -1348,6 +1400,7 @@ class Kernel(QWidget):
         sl.addWidget(logo)
         sl.addSpacing(20)
         outer.addWidget(side)
+        outer.addWidget(SideGrip(side))
 
         right = QWidget()
         rv = QVBoxLayout(right)
@@ -1369,8 +1422,8 @@ class Kernel(QWidget):
 
         self.navs = []
         group = QButtonGroup(self)
-        for text, idx, g in (("Tweaks", TWEAKS, "tweaks"), ("Applications", APPS, "apps"),
-                             ("Performance", GAMING, "gaming"), ("Storage", STORAGE, "storage"),
+        for text, idx, g in (("Tweaks", TWEAKS, "tweaks"), ("Performance", GAMING, "gaming"),
+                             ("Applications", APPS, "apps"), ("Storage", STORAGE, "storage"),
                              ("Specifications", SPECS, "specs"), ("Activity", ACTIVITY, "activity")):
             sl.addWidget(self.nav(text, idx, g, group))
         sl.addStretch()
@@ -1605,7 +1658,7 @@ class Kernel(QWidget):
             self.refresh_display_status()
         if index == SPECS:
             self.start_monitor()
-        self.footer.setVisible(index in (TWEAKS, GAMING, STORAGE))
+        self.footer.setVisible(index in (TWEAKS, GAMING))
         page = self.stack.currentWidget()
         fx = QGraphicsOpacityEffect(page)
         fx.setOpacity(0.0)
@@ -1980,7 +2033,35 @@ class Kernel(QWidget):
 
     def refresh_drives(self):
         self.rescan_btn.setEnabled(False)
-        threading.Thread(target=lambda: self.drives_ready.emit(storage.drives()), daemon=True).start()
+        pre, self.prefetch = self.prefetch, None
+
+        def work():
+            self.drives_ready.emit(pre["drives"].result() if pre else storage.drives())
+        threading.Thread(target=work, daemon=True).start()
+        self.scan_source = pre
+
+    def start_storage_prefetch(self):
+        from concurrent.futures import Future
+        pre = {"drives": Future(), "installed": Future(), "res": {}, "done": threading.Event()}
+
+        def run():
+            try:
+                drives = storage.drives()
+            except Exception:
+                drives = []
+            pre["drives"].set_result(drives)
+            try:
+                installed = storage.installed_apps()
+            except Exception:
+                installed = []
+            for d in drives:
+                try:
+                    pre["res"][d[0]] = storage.analyze(d[0], installed)
+                except Exception:
+                    pre["res"][d[0]] = {"root": [], "user": [], "categories": [], "apps": []}
+            pre["done"].set()
+        threading.Thread(target=run, daemon=True).start()
+        self.prefetch = pre
 
     def show_drives(self, items):
         roots = [i[0] for i in items]
@@ -2016,7 +2097,16 @@ class Kernel(QWidget):
             info["bar"].set_scanning(True)
         self.render_apps()
 
+        pre, self.scan_source = self.scan_source, None
+
         def work():
+            if pre:
+                pre["done"].wait()
+                for root in roots:
+                    self.storage_ready.emit(root, pre["res"].get(
+                        root, {"root": [], "user": [], "categories": [], "apps": []}))
+                self.scan_finished.emit()
+                return
             try:
                 installed = storage.installed_apps()
             except Exception:
@@ -2632,7 +2722,7 @@ class Kernel(QWidget):
         temp = Row(
             "CPU temperature tracking",
             "Show the average of available CPU core sensors or each core separately")
-        self.cpu_temp_combo = QComboBox()
+        self.cpu_temp_combo = FluentCombo()
         self.cpu_temp_combo.addItem("Average of cores", "average")
         self.cpu_temp_combo.addItem("Per core", "per_core")
         self.cpu_temp_combo.setCurrentIndex(self.cpu_temp_combo.findData(self.cfg.cpu_temp_mode))
