@@ -11,8 +11,8 @@ import threading
 import time
 
 from PySide6.QtCore import (
-    Property, QEasingCurve, QEvent, QObject, QParallelAnimationGroup, QPoint, QPointF, QPropertyAnimation,
-    QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize,
+    Property, QEasingCurve, QEvent, QObject, QParallelAnimationGroup, QPoint, QPointF,
+    QPropertyAnimation, QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient,
@@ -20,18 +20,22 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
-    QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
-    QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QComboBox, QGridLayout, QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 from shiboken6 import isValid
 
 import apps
+import display_controls
 import specs
 import storage
 from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
 BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
+ROW_ACTION_BUTTON_WIDTH = 96
+CATEGORY_COLORS = {"Apps": "#5b9cff", "Games": "#b57bff", "Documents & files": "#4fd08a",
+                   "System": "#ffb454", "Other": "#8a8a8a"}
 
 QSS = f"""
 * {{ font-family: 'Segoe UI Variable Text', 'Segoe UI'; color: {TEXT}; }}
@@ -50,6 +54,9 @@ QLineEdit#search:focus {{ border-color: #4a4a4a; }}
 #row {{ background: transparent; border: none; border-radius: 14px; }}
 QPlainTextEdit {{ background: transparent; border: 1px solid {BORDER}; border-radius: 12px; padding: 12px;
                  font-family: 'Cascadia Mono', Consolas; font-size: 14px; color: #bdbdbd; }}
+#metric {{ background: #080808; border: 1px solid {BORDER}; border-radius: 12px; }}
+#metricValue {{ font-size: 22px; font-weight: 500; }}
+#attention {{ background: #100e08; border: 1px solid #55421c; border-radius: 14px; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: #262626; border-radius: 3px; min-height: 30px; }}
 QScrollBar::handle:vertical:hover {{ background: #363636; }}
@@ -82,6 +89,10 @@ def glyph_icon(ch, size=20, on_color=TEXT):
     return icon
 
 
+def total_fraction(total, free):
+    return (total - free) / total if total else 0.0
+
+
 def is_admin():
     try:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
@@ -102,6 +113,9 @@ class Config:
         self.toggles = {}
         self.applied = {}
         self.smooth_scroll = True
+        self.cpu_temp_mode = "average"
+        self.nvidia_gamma = 100
+        self.nvidia_contrast = 50
         self.win_size = None
         self.download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "kernel")
         self.load(self.path)
@@ -124,6 +138,12 @@ class Config:
             self.download_dir = d["download_dir"]
         if isinstance(d.get("smooth_scroll"), bool):
             self.smooth_scroll = d["smooth_scroll"]
+        if d.get("cpu_temp_mode") in ("average", "per_core"):
+            self.cpu_temp_mode = d["cpu_temp_mode"]
+        if type(d.get("nvidia_gamma")) is int and 40 <= d["nvidia_gamma"] <= 280:
+            self.nvidia_gamma = d["nvidia_gamma"]
+        if type(d.get("nvidia_contrast")) is int and 0 <= d["nvidia_contrast"] <= 100:
+            self.nvidia_contrast = d["nvidia_contrast"]
         ws = d.get("window")
         if isinstance(ws, list) and len(ws) == 2 and all(isinstance(x, int) for x in ws):
             self.win_size = ws
@@ -136,7 +156,11 @@ class Config:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({"toggles": self.toggles, "applied": self.applied,
                            "download_dir": self.download_dir,
-                           "smooth_scroll": self.smooth_scroll, "window": self.win_size}, f, indent=2)
+                           "smooth_scroll": self.smooth_scroll,
+                           "cpu_temp_mode": self.cpu_temp_mode,
+                           "nvidia_gamma": self.nvidia_gamma,
+                           "nvidia_contrast": self.nvidia_contrast,
+                           "window": self.win_size}, f, indent=2)
             return True
         except OSError:
             return False
@@ -225,7 +249,7 @@ class AnimButton(QPushButton):
 
 
 class LogView(QPlainTextEdit):
-    """Log box with Copy and Clear buttons floating in its top-right corner."""
+    """Log box with Copy and Clear buttons floating in its bottom-left corner."""
 
     def __init__(self, clearable=True):
         super().__init__()
@@ -250,44 +274,15 @@ class LogView(QPlainTextEdit):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        x = self.width() - 12
-        for b in (self.clear_btn, self.copy_btn):
+        x = 12
+        for b in (self.copy_btn, self.clear_btn):
             if b.isHidden():
                 continue
             b.setFixedWidth(88)
             b.adjustSize()
-            x -= b.width()
-            b.move(x, 12)
+            b.move(x, self.height() - b.height() - 12)
             b.raise_()
-            x -= 8
-
-
-class SpecView(LogView):
-    """Read-only spec list: click a line to copy its value, or copy everything."""
-
-    def __init__(self):
-        super().__init__(clearable=False)
-        self.copy_label = "Copy all"
-        self.copy_btn.setText(self.copy_label)
-        self.setReadOnly(True)
-        self.setCursor(Qt.PointingHandCursor)
-        self.viewport().setCursor(Qt.PointingHandCursor)
-        self.values = []
-
-    def set_specs(self, specs):
-        self.values = [v for _, v in specs]
-        width = max((len(k) for k, _ in specs), default=0) + 2
-        self.setPlainText("\n".join(f"{k + ':':<{width}}{v}" for k, v in specs))
-
-    def mousePressEvent(self, e):
-        cur = self.cursorForPosition(e.position().toPoint())
-        i = cur.blockNumber()
-        if e.button() == Qt.LeftButton and 0 <= i < len(self.values):
-            QApplication.clipboard().setText(self.values[i])
-            cur.select(cur.SelectionType.LineUnderCursor)
-            self.setTextCursor(cur)
-            self.flash_copied()
-        super().mousePressEvent(e)
+            x += b.width() + 8
 
 
 class Button(AnimButton):
@@ -421,6 +416,9 @@ class Button(AnimButton):
         fm = QFontMetrics(self.font())
         tw = fm.horizontalAdvance(label)
         icon = self.icon()
+        if icon.isNull():
+            p.drawText(QRectF(self.rect()), Qt.AlignCenter, label)
+            return
         iw = self.iconSize().width() + 8 if not icon.isNull() else 0
         x = (self.width() - tw - iw) / 2
         if not icon.isNull():
@@ -550,38 +548,126 @@ class AppIcon(QWidget):
 
 
 class Bar(QWidget):
+    """Progress bar. Segment changes morph smoothly and set_scanning() fades in a moving shimmer."""
+
     def __init__(self):
         super().__init__()
         self.value = -1.0
+        self.segments = []
+        self._from = {}
+        self._to = {}
+        self._order = []
+        self._morph = 1.0
+        self._scan = 0.0
+        self.scanning = False
         self.setFixedHeight(5)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
+        self.morph_anim = QPropertyAnimation(self, b"morph", self)
+        self.morph_anim.setDuration(600)
+        self.morph_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.scan_anim = QPropertyAnimation(self, b"scan", self)
+        self.scan_anim.setDuration(450)
+        self.scan_anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.scan_anim.finished.connect(self.sync_timer)
+
+    def get_morph(self):
+        return self._morph
+
+    def set_morph(self, v):
+        self._morph = v
+        self.update()
+
+    morph = Property(float, get_morph, set_morph)
+
+    def get_scan(self):
+        return self._scan
+
+    def set_scan(self, v):
+        self._scan = v
+        self.update()
+
+    scan = Property(float, get_scan, set_scan)
+
+    def sync_timer(self):
+        if (self.scanning or self._scan > 0.001 or self.value < 0) and not self.segments_only():
+            if not self.timer.isActive():
+                self.timer.start(16)
+        else:
+            self.timer.stop()
+
+    def segments_only(self):
+        return self.value >= 0 and not self.scanning and self._scan <= 0.001
 
     def set_value(self, v):
         self.value = v
-        if v < 0 and not self.timer.isActive():
-            self.timer.start(16)
-        elif v >= 0:
-            self.timer.stop()
+        self.sync_timer()
         self.update()
+
+    def current(self):
+        keys = list(dict.fromkeys(self._order))
+        return {k: self._from.get(k, 0.0) + (self._to.get(k, 0.0) - self._from.get(k, 0.0)) * self._morph
+                for k in keys}
+
+    def set_segments(self, segments):
+        """segments: [(fraction of the bar, color hex)] drawn left to right; morphs from the old look."""
+        start = self.current()
+        if not start and self.value >= 0:
+            start = {"#ffffff": min(self.value, 1.0)}
+        self._to = {color: fraction for fraction, color in segments}
+        self._from = start
+        self._order = [color for _, color in segments] + [k for k in start if k not in self._to]
+        self.segments = segments
+        self.morph_anim.stop()
+        self._morph = 0.0
+        self.morph_anim.setStartValue(0.0)
+        self.morph_anim.setEndValue(1.0)
+        self.morph_anim.start()
+        self.sync_timer()
+
+    def set_scanning(self, on):
+        self.scanning = on
+        self.scan_anim.stop()
+        self.scan_anim.setStartValue(self._scan)
+        self.scan_anim.setEndValue(1.0 if on else 0.0)
+        self.scan_anim.start()
+        self.sync_timer()
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         w, h = self.width(), self.height()
         track = QPainterPath()
-        track.addRoundedRect(QRectF(0, 0, w, h), 2, 2)
+        track.addRoundedRect(QRectF(0, 0, w, h), h / 2.0, h / 2.0)
         p.fillPath(track, QColor("#1f1f1f"))
         p.setClipPath(track)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor("#ffffff"))
-        if self.value >= 0:
+        if self._order:
+            x = 0.0
+            for color, fraction in self.current().items():
+                seg = w * fraction
+                if seg > 0.5:
+                    p.setBrush(QColor(color))
+                    p.drawRect(QRectF(x, 0, seg - 2 if seg > 4 else seg, h))
+                x += seg
+        elif self.value >= 0:
+            p.setBrush(QColor("#ffffff"))
             p.drawRect(QRectF(0, 0, w * min(self.value, 1.0), h))
         else:
+            p.setBrush(QColor("#ffffff"))
             seg = w * 0.3
             x = (w + seg) * ((time.monotonic() * 0.8) % 1.0) - seg
             p.drawRect(QRectF(x, 0, seg, h))
-
+        if self._scan > 0.001:
+            band = w * 0.35
+            x = (w + band) * ((time.monotonic() * 0.7) % 1.0) - band
+            g = QLinearGradient(x, 0, x + band, 0)
+            peak = int(120 * self._scan)
+            g.setColorAt(0.0, QColor(255, 255, 255, 0))
+            g.setColorAt(0.5, QColor(255, 255, 255, peak))
+            g.setColorAt(1.0, QColor(255, 255, 255, 0))
+            p.setBrush(QBrush(g))
+            p.drawRect(QRectF(0, 0, w, h))
 
 class Toggle(QWidget):
     toggled = Signal(bool)
@@ -688,6 +774,74 @@ class HoverFrame(QFrame):
         super().paintEvent(e)
 
 
+class SpecRow(HoverFrame):
+    """Spec line: clicking anywhere on the row copies its whole value."""
+
+    def __init__(self, label, value, button=None, copyable=True):
+        super().__init__()
+        self.setObjectName("row")
+        self.copyable = copyable
+        if copyable:
+            self.setCursor(Qt.PointingHandCursor)
+        self.copy_text = value
+        self.flash_id = 0
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(14)
+        self.name = QLabel(label)
+        self.name.setObjectName("muted")
+        self.name.setFixedWidth(150)
+        self.value = QLabel(value)
+        self.value.setWordWrap(True)
+        self.value.setStyleSheet("font-size: 16px;")
+        self.hint = QLabel("")
+        self.hint.setObjectName("muted")
+        self.hint.setFixedWidth(92)
+        self.hint.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        for w in (self.name, self.value, self.hint):
+            w.setAttribute(Qt.WA_TransparentForMouseEvents)
+        lay.addWidget(self.name, 0, Qt.AlignTop)
+        lay.addWidget(self.value, 1)
+        if button is not None:
+            lay.addWidget(button, 0, Qt.AlignTop)
+        lay.addWidget(self.hint, 0, Qt.AlignTop)
+
+    def set_value(self, text, copy_text=None):
+        self.value.setText(text)
+        self.copy_text = text if copy_text is None else copy_text
+
+    def set_attention(self, on):
+        self.setObjectName("attention" if on else "row")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def enterEvent(self, e):
+        if self.copyable and self.hint.text() != "Copied":
+            self.hint.setText("Click to copy")
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        if self.hint.text() != "Copied":
+            self.hint.setText("")
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if not self.copyable or e.button() != Qt.LeftButton:
+            return super().mousePressEvent(e)
+        QApplication.clipboard().setText(self.copy_text)
+        self.flash_id += 1
+        flash_id = self.flash_id
+        self.hint.setText("Copied")
+        self.hint.setStyleSheet("color: #7ee0a0;")
+        self.fade(1.0, 60)
+
+        def restore():
+            if self.flash_id == flash_id and isValid(self):
+                self.hint.setStyleSheet("")
+                self.hint.setText("Click to copy" if self.underMouse() else "")
+        QTimer.singleShot(1200, restore)
+
+
 class Row(HoverFrame):
     def __init__(self, title, subtitle="", icon=None, right_margin=16):
         super().__init__()
@@ -715,9 +869,33 @@ class Row(HoverFrame):
         lay.addLayout(self.right)
 
 
+class MetricCard(QFrame):
+    def __init__(self, title):
+        super().__init__()
+        self.setObjectName("metric")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(6)
+        self.title = QLabel(title)
+        self.title.setObjectName("muted")
+        self.value = QLabel("Unavailable")
+        self.value.setObjectName("metricValue")
+        layout.addWidget(self.title)
+        layout.addWidget(self.value)
+
+    def set_value(self, text):
+        self.value.setText(text)
+
+    def set_alert(self, alert):
+        self.value.setStyleSheet("color: #ff6268;" if alert else "")
+
+    def set_temperature(self, temperature):
+        self.value.setStyleSheet("color: #ff6268;" if temperature is not None and temperature >= 80 else "")
+
+
 class TaskRow(Row):
     def __init__(self, title, subtitle, on_apply=None, on_revert=None, reversible=True):
-        super().__init__(title, subtitle, right_margin=0)
+        super().__init__(title, subtitle)
         self.reversible = reversible
         self.sub.setWordWrap(True)
         self.setCursor(Qt.ArrowCursor)
@@ -726,13 +904,13 @@ class TaskRow(Row):
         if on_apply:
             self.apply = Button("Apply")
             self.apply.setCursor(Qt.PointingHandCursor)
-            self.apply.setMinimumWidth(88)
+            self.apply.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
             self.apply.clicked.connect(on_apply)
             self.right.addWidget(self.apply)
         if on_revert:
             self.revert = Button("Revert")
             self.revert.setCursor(Qt.PointingHandCursor)
-            self.revert.setMinimumWidth(88)
+            self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
             self.revert.clicked.connect(on_revert)
             self.right.addWidget(self.revert)
         self.toggle = Toggle()
@@ -755,15 +933,15 @@ class RunRow(Row):
     """Single-use action: one click runs it."""
 
     def __init__(self, title, subtitle, on_run, on_revert, active=False):
-        super().__init__(title, subtitle, right_margin=0)
+        super().__init__(title, subtitle)
         self.b = Button("Run")
         self.b.setCursor(Qt.PointingHandCursor)
-        self.b.setMinimumWidth(88)
+        self.b.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.b.clicked.connect(on_run)
         self.right.addWidget(self.b)
         self.revert = Button("Revert")
         self.revert.setCursor(Qt.PointingHandCursor)
-        self.revert.setMinimumWidth(88)
+        self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.revert.clicked.connect(on_revert)
         self.right.addWidget(self.revert)
         self.set_active(active)
@@ -912,6 +1090,7 @@ class Page(QScrollArea):
         s.setObjectName("section")
         self.col.addWidget(s)
         self.col.addSpacing(8)
+        return s
 
     def add(self, w):
         self.col.addWidget(w)
@@ -1117,9 +1296,14 @@ class Kernel(QWidget):
     logged = Signal(str)
     found = Signal(list)
     icon_ready = Signal(str, QImage)
-    specs_ready = Signal(list)
+    specs_ready = Signal(list, str)
+    updates_ready = Signal(object)
     drives_ready = Signal(list)
     storage_ready = Signal(str, dict)
+    scan_finished = Signal()
+    monitor_sample = Signal(dict)
+    monitor_error = Signal(str)
+    monitor_finished = Signal(int, str)
 
     def __init__(self):
         super().__init__()
@@ -1186,8 +1370,7 @@ class Kernel(QWidget):
         self.navs = []
         group = QButtonGroup(self)
         for text, idx, g in (("Tweaks", TWEAKS, "tweaks"), ("Applications", APPS, "apps"),
-                                     ("Performance", GAMING, "gaming"),
-                             ("Storage", STORAGE, "storage"),
+                             ("Performance", GAMING, "gaming"), ("Storage", STORAGE, "storage"),
                              ("Specifications", SPECS, "specs"), ("Activity", ACTIVITY, "activity")):
             sl.addWidget(self.nav(text, idx, g, group))
         sl.addStretch()
@@ -1418,6 +1601,10 @@ class Kernel(QWidget):
             return
         self.finish_anim()
         self.stack.setCurrentIndex(index)
+        if index == GAMING:
+            self.refresh_display_status()
+        if index == SPECS:
+            self.start_monitor()
         self.footer.setVisible(index in (TWEAKS, GAMING, STORAGE))
         page = self.stack.currentWidget()
         fx = QGraphicsOpacityEffect(page)
@@ -1510,10 +1697,211 @@ class Kernel(QWidget):
     # ---- pages ----
 
     def build_gaming(self):
-        return self.build_tweaks("Performance", ("Performance",))
+        self.nvidia_control = None
+        self.nvidia_error = None
+        try:
+            self.nvidia_control = display_controls.NVIDIAControl()
+        except display_controls.NVIDIAUnavailable as ex:
+            self.nvidia_error = str(ex)
+        page = self.build_tweaks("Performance", ("Performance",))
+        self.add_display_controls(page)
+        page.col.addStretch()
+        return page
 
-    def build_tweaks(self, title="Tweaks", SECTION_ORDER=("Appearance", "System")):
+    def add_display_controls(self, page):
+        page.section("Display")
+        self.refresh_row = Row(
+            "Highest refresh rate",
+            "Checking the primary NVIDIA display's highest rate at its current resolution...")
+        self.refresh_row.setObjectName("row")
+        self.highest_refresh_button = Button("Check")
+        self.highest_refresh_button.clicked.connect(self.apply_highest_refresh)
+        self.refresh_row.right.addWidget(self.highest_refresh_button)
+        page.add(self.refresh_row)
+        self.display_status = QLabel(
+            "Settings are applied through the NVIDIA driver; the NVIDIA App is not required."
+            if self.nvidia_control else
+            f"NVIDIA display controls are unavailable: {self.nvidia_error}")
+        self.display_status.setObjectName("muted")
+        self.display_status.setWordWrap(True)
+        self.display_status.setContentsMargins(16, 0, 16, 0)
+        page.col.addWidget(self.display_status)
+
+        self.gamma_slider = QSlider(Qt.Horizontal)
+        self.gamma_slider.setRange(40, 280)
+        self.gamma_slider.setValue(self.cfg.nvidia_gamma)
+        self.gamma_slider.setFixedWidth(220)
+        self.gamma_value = QLabel(f"{self.cfg.nvidia_gamma / 100:.2f}")
+        self.gamma_slider.valueChanged.connect(self.queue_gamma_contrast)
+        gamma = Row("Gamma", "Adjust the NVIDIA driver gamma correction")
+        gamma.right.addWidget(self.gamma_value)
+        gamma.right.addWidget(self.gamma_slider)
+        page.add(gamma)
+
+        self.contrast_slider = QSlider(Qt.Horizontal)
+        self.contrast_slider.setRange(0, 100)
+        self.contrast_slider.setValue(self.cfg.nvidia_contrast)
+        self.contrast_slider.setFixedWidth(220)
+        self.contrast_value = QLabel(f"{self.cfg.nvidia_contrast}%")
+        self.contrast_slider.valueChanged.connect(self.queue_gamma_contrast)
+        contrast = Row("Contrast", "Adjust contrast through the NVIDIA driver")
+        contrast.right.addWidget(self.contrast_value)
+        contrast.right.addWidget(self.contrast_slider)
+        page.add(contrast)
+
+        self.gamma_contrast_timer = QTimer(self)
+        self.gamma_contrast_timer.setSingleShot(True)
+        self.gamma_contrast_timer.timeout.connect(self.apply_gamma_contrast)
+        self.gamma_slider.sliderReleased.connect(lambda: self.gamma_contrast_timer.start(0))
+        self.contrast_slider.sliderReleased.connect(lambda: self.gamma_contrast_timer.start(0))
+
+        self.vibrance_slider = QSlider(Qt.Horizontal)
+        self.vibrance_slider.setFixedWidth(220)
+        self.vibrance_value = QLabel("Unavailable")
+        self.vibrance_range = None
+        vibrance = Row("Digital vibrance", "Adjust NVIDIA digital vibrance")
+        vibrance.right.addWidget(self.vibrance_value)
+        vibrance.right.addWidget(self.vibrance_slider)
+        page.add(vibrance)
+        self.vibrance_slider.valueChanged.connect(self.queue_vibrance)
+        self.vibrance_timer = QTimer(self)
+        self.vibrance_timer.setSingleShot(True)
+        self.vibrance_timer.timeout.connect(self.apply_vibrance)
+        self.vibrance_slider.sliderReleased.connect(lambda: self.vibrance_timer.start(0))
+
+        if self.nvidia_control is None:
+            for slider in (self.gamma_slider, self.contrast_slider, self.vibrance_slider):
+                slider.setEnabled(False)
+            self.gamma_value.setText("Unavailable")
+            self.contrast_value.setText("Unavailable")
+        else:
+            if self.nvidia_control.supports_gamma_contrast:
+                if self.cfg.nvidia_gamma != 100 or self.cfg.nvidia_contrast != 50:
+                    self.apply_gamma_contrast()
+            else:
+                self.gamma_slider.setEnabled(False)
+                self.contrast_slider.setEnabled(False)
+                self.gamma_value.setText("Unavailable")
+                self.contrast_value.setText("Unavailable")
+                self.display_status.setText(
+                    f"{self.display_status.text()} NVIDIA gamma-correction control is unavailable.")
+
+            if not self.nvidia_control.supports_vibrance:
+                self.vibrance_slider.setEnabled(False)
+                self.display_status.setText(
+                    f"{self.display_status.text()} NVIDIA digital-vibrance control is unavailable.")
+            else:
+                try:
+                    minimum, maximum, current = self.nvidia_control.vibrance_info()
+                    self.vibrance_range = (minimum, maximum)
+                    self.vibrance_slider.setRange(minimum, maximum)
+                    self.vibrance_slider.setValue(current)
+                    self.vibrance_value.setText(self.vibrance_text(current))
+                except display_controls.UnsupportedDisplay as ex:
+                    self.vibrance_slider.setEnabled(False)
+                    self.display_status.setText(f"{self.display_status.text()} {ex}")
+
+        self.refresh_display_status()
+
+    def refresh_display_status(self):
+        if self.nvidia_control is None:
+            self.refresh_row.sub.setText("Unavailable without an active NVIDIA display output.")
+            self.highest_refresh_button.setText("Unavailable")
+            self.highest_refresh_button.setEnabled(False)
+            return
+        try:
+            info = display_controls.refresh_info()
+        except display_controls.DisplayError as ex:
+            self.refresh_row.sub.setText(str(ex))
+            self.highest_refresh_button.setText("Unavailable")
+            self.highest_refresh_button.setEnabled(False)
+            self.refresh_row.setObjectName("row")
+            self.refresh_row.style().unpolish(self.refresh_row)
+            self.refresh_row.style().polish(self.refresh_row)
+            return
+        if info["device"].casefold() != self.nvidia_control.display_name.casefold():
+            self.refresh_row.sub.setText(
+                "The primary display is no longer connected to the active NVIDIA output.")
+            self.highest_refresh_button.setText("Unavailable")
+            self.highest_refresh_button.setEnabled(False)
+            self.refresh_row.setObjectName("row")
+            self.refresh_row.style().unpolish(self.refresh_row)
+            self.refresh_row.style().polish(self.refresh_row)
+            return
+        current, highest = info["current"], info["highest"]
+        if highest > current:
+            self.refresh_row.sub.setText(
+                f"Highest refresh rate not applied · Current {current} Hz · Available {highest} Hz "
+                f"at {info['width']}×{info['height']}.")
+            self.highest_refresh_button.setText(f"Apply {highest} Hz")
+            self.highest_refresh_button.setEnabled(True)
+            self.refresh_row.setObjectName("attention")
+        else:
+            self.refresh_row.sub.setText(
+                f"Highest available rate is active · {current} Hz at {info['width']}×{info['height']}.")
+            self.highest_refresh_button.setText("Applied")
+            self.highest_refresh_button.setEnabled(False)
+            self.refresh_row.setObjectName("row")
+        self.refresh_row.style().unpolish(self.refresh_row)
+        self.refresh_row.style().polish(self.refresh_row)
+
+    def apply_highest_refresh(self):
+        if self.nvidia_control is None:
+            return
+        try:
+            display_controls.apply_highest_refresh(self.nvidia_control.display_name)
+        except (display_controls.DisplayError, OSError) as ex:
+            self.display_status.setText(f"Could not apply the highest refresh rate: {ex}")
+            self.logged.emit(f"Display refresh-rate change failed: {ex}")
+            return
+        self.refresh_display_status()
+        self.logged.emit("Applied the highest refresh rate available for the primary display.")
+
+    def queue_gamma_contrast(self, value):
+        if self.sender() is self.gamma_slider:
+            self.gamma_value.setText(f"{value / 100:.2f}")
+        else:
+            self.contrast_value.setText(f"{value}%")
+        self.gamma_contrast_timer.start(350)
+
+    def apply_gamma_contrast(self):
+        if self.nvidia_control is None:
+            return
+        try:
+            self.nvidia_control.set_gamma_contrast(
+                self.gamma_slider.value() / 100, self.contrast_slider.value())
+        except display_controls.DisplayError as ex:
+            self.gamma_slider.setEnabled(False)
+            self.contrast_slider.setEnabled(False)
+            self.display_status.setText(f"NVIDIA gamma or contrast adjustment failed: {ex}")
+            self.logged.emit(f"NVIDIA display adjustment failed: {ex}")
+            return
+        self.cfg.nvidia_gamma = self.gamma_slider.value()
+        self.cfg.nvidia_contrast = self.contrast_slider.value()
+        self.cfg.save()
+
+    @staticmethod
+    def vibrance_text(value):
+        return f"{value}%" if 0 <= value <= 100 else str(value)
+
+    def queue_vibrance(self, value):
+        self.vibrance_value.setText(self.vibrance_text(value))
+        self.vibrance_timer.start(350)
+
+    def apply_vibrance(self):
+        if self.nvidia_control is None or self.vibrance_range is None:
+            return
+        try:
+            self.nvidia_control.set_vibrance(self.vibrance_slider.value())
+        except display_controls.DisplayError as ex:
+            self.vibrance_slider.setEnabled(False)
+            self.display_status.setText(f"NVIDIA digital-vibrance adjustment failed: {ex}")
+            self.logged.emit(f"NVIDIA digital-vibrance adjustment failed: {ex}")
+
+    def build_tweaks(self, title="Tweaks", SECTION_ORDER=("Appearance", "System"), prefix=None):
         page = Page(title)
+        if prefix:
+            prefix(page)
         CATEGORY_MAP = {
             "Privacy": "System",
             "Apps": "System",
@@ -1540,7 +1928,8 @@ class Kernel(QWidget):
             if action_names:
                 for _, name, desc, fn in (t for t in visible if t[0] == cat and t[3].__name__ in action_names):
                     page.add(run_row(name, fn))
-        page.col.addStretch()
+        if title != "Performance":
+            page.col.addStretch()
         return page
 
     def run_row(self, name, fn):
@@ -1553,104 +1942,182 @@ class Kernel(QWidget):
 
     def build_storage(self):
         page = Page("Storage")
-        page.section("Quick actions")
-        for cat, name, desc, fn in TASKS:
-            if cat == "Storage":
-                page.add(self.run_row(name, fn))
-        page.section("Devices and drives")
+        header = QHBoxLayout()
+        page.col.addSpacing(26)
+        label = QLabel("Drives")
+        label.setObjectName("section")
+        header.addWidget(label)
+        header.addStretch()
+        self.rescan_btn = Button("Rescan")
+        self.rescan_btn.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
+        self.rescan_btn.setEnabled(False)
+        self.rescan_btn.clicked.connect(self.refresh_drives)
+        header.addWidget(self.rescan_btn)
+        page.col.addLayout(header)
+        page.col.addSpacing(8)
         self.drive_box = QVBoxLayout()
         self.drive_box.setSpacing(2)
         page.col.addLayout(self.drive_box)
-        page.section("What's taking up space")
-        self.usage_hint = QLabel("Pick a drive and press Analyze.")
-        self.usage_hint.setObjectName("muted")
-        page.col.addWidget(self.usage_hint)
-        self.usage_box = QVBoxLayout()
-        self.usage_box.setSpacing(2)
-        page.col.addLayout(self.usage_box)
+
+        page.section("Biggest apps and games")
+        self.apps_box = QVBoxLayout()
+        self.apps_box.setSpacing(2)
+        page.col.addLayout(self.apps_box)
+
+        page.section("Clean up")
+        for cat, name, desc, fn in TASKS:
+            if cat == "Storage":
+                page.add(self.run_row(name, fn))
         page.col.addStretch()
+        self.storage_apps = {}
+        self.apps_expanded = False
+        self.drive_rows = {}
         self.storage_ready.connect(self.show_usage)
+        self.scan_finished.connect(lambda: self.rescan_btn.setEnabled(True))
         self.drives_ready.connect(self.show_drives)
         self.refresh_drives()
         return page
 
     def refresh_drives(self):
+        self.rescan_btn.setEnabled(False)
         threading.Thread(target=lambda: self.drives_ready.emit(storage.drives()), daemon=True).start()
 
     def show_drives(self, items):
-        while self.drive_box.count():
-            w = self.drive_box.takeAt(0).widget()
-            if w:
-                w.deleteLater()
+        roots = [i[0] for i in items]
+        if roots != list(self.drive_rows):
+            while self.drive_box.count():
+                w = self.drive_box.takeAt(0).widget()
+                if w:
+                    w.deleteLater()
+            self.drive_rows = {}
+            self.storage_apps = {}
+            for root, label, free, total in items:
+                row = Row(f"{label} ({root[:2]})", "")
+                legend = QLabel("")
+                legend.setTextFormat(Qt.RichText)
+                legend.setWordWrap(True)
+                legend.setStyleSheet("font-size: 13px;")
+                row.text_col.addWidget(legend)
+                bar = Bar()
+                bar.setFixedHeight(10)
+                bar.setMinimumWidth(260)
+                row.right.addWidget(bar)
+                self.drive_box.addWidget(row)
+                self.drive_rows[root] = {"row": row, "bar": bar, "legend": legend, "legend_html": "",
+                                         "total": total, "free": free}
         for root, label, free, total in items:
-            used = total - free
-            row = Row(f"{label} ({root[:2]})",
-                      f"{apps.human(free)} free of {apps.human(total)}")
-            bar = Bar()
-            bar.set_value(used / total if total else 0)
-            bar.setMinimumWidth(220)
-            row.right.addWidget(bar)
-            b = Button("Analyze")
-            b.setCursor(Qt.PointingHandCursor)
-            b.setMinimumWidth(116)
-            b.clicked.connect(lambda _=False, r=root, btn=b: self.analyze_drive(r, btn))
-            row.right.addWidget(b)
-            self.drive_box.addWidget(row)
-
-    def analyze_drive(self, root, btn):
-        btn.setEnabled(False)
-        btn.setText("Scanning...")
-        self.usage_hint.setText(f"Scanning {root} - this can take a minute.")
-        self.usage_hint.show()
+            info = self.drive_rows[root]
+            info.update(total=total, free=free)
+            info["row"].sub.setText(f"{apps.human(total - free)} used · {apps.human(free)} free of {apps.human(total)}")
+            info["row"].sub.show()
+            if not info["legend_html"]:
+                info["bar"].set_value(total_fraction(total, free))
+                info["legend"].setText('<span style="color:#8a8a8a">Scanning...</span>')
+            info["bar"].set_scanning(True)
+        self.render_apps()
 
         def work():
             try:
-                res = storage.analyze(root)
+                installed = storage.installed_apps()
             except Exception:
-                res = {"root": [], "user": []}
-            self.storage_ready.emit(root, res)
+                installed = []
+            for root in roots:
+                try:
+                    res = storage.analyze(root, installed)
+                except Exception:
+                    res = {"root": [], "user": [], "categories": [], "apps": []}
+                self.storage_ready.emit(root, res)
+            self.scan_finished.emit()
         threading.Thread(target=work, daemon=True).start()
-        self._analyze_btn = btn
+
+    def show_drive_breakdown(self, root, categories):
+        info = self.drive_rows.get(root)
+        if not info:
+            return
+        info["bar"].set_scanning(False)
+        total = info["total"] or 1
+        if not categories:
+            info["legend"].setText("")
+            return
+        info["bar"].set_segments([(size / total, CATEGORY_COLORS[name]) for name, size in categories])
+        parts = [f'<span style="color:{CATEGORY_COLORS[name]}">●</span>&nbsp;{name}&nbsp;{apps.human(size)}'
+                 for name, size in categories]
+        parts.append(f'<span style="color:#3a3a3a">●</span>&nbsp;Free&nbsp;{apps.human(info["free"])}')
+        info["legend_html"] = "&nbsp;&nbsp;&nbsp;".join(parts)
+        info["legend"].setText(info["legend_html"])
+    def uninstall_app(self, app, btn):
+        if app["uri"]:
+            os.startfile(app["uri"])
+            return
+        if btn.text() != "Confirm":
+            btn.setText("Confirm")
+
+            def reset():
+                if isValid(btn) and btn.text() == "Confirm":
+                    btn.setText("Uninstall")
+            QTimer.singleShot(3000, reset)
+            return
+        btn.setText("Uninstall")
+        subprocess.Popen(app["command"], shell=True)
 
     def show_usage(self, root, res):
-        btn = getattr(self, "_analyze_btn", None)
-        if btn is not None and isValid(btn):
-            btn.setEnabled(True)
-            btn.setText("Analyze")
-        while self.usage_box.count():
-            w = self.usage_box.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-        self.usage_hint.hide()
-        groups = (("On " + root, res["root"]), ("In your user folder", res["user"]))
-        for heading, items in groups:
-            if not items:
-                continue
-            h = QLabel(heading)
-            h.setObjectName("section")
-            self.usage_box.addSpacing(14)
-            self.usage_box.addWidget(h)
-            top = items[0][1] or 1
-            for path, size, is_dir in items:
-                row = Row(os.path.basename(path.rstrip("\\")) or path, path)
-                row.sub.setWordWrap(True)
-                row.sub.setTextInteractionFlags(Qt.TextSelectableByMouse)
-                sz = QLabel(apps.human(size))
-                sz.setStyleSheet("font-size: 15px;")
-                bar = Bar()
-                bar.set_value(size / top)
-                bar.setFixedWidth(120)
-                row.right.addWidget(bar)
-                row.right.addWidget(sz)
-                b = Button("Show")
-                b.setCursor(Qt.PointingHandCursor)
-                b.setMinimumWidth(84)
-                b.clicked.connect(lambda _=False, p=path, d=is_dir: self.show_path(p, d))
-                row.right.addWidget(b)
-                self.usage_box.addWidget(row)
-        if not self.usage_box.count():
-            self.usage_hint.setText("Nothing could be read from this drive.")
-            self.usage_hint.show()
+        self.show_drive_breakdown(root, res.get("categories", []))
+        self.storage_apps[root] = res.get("apps", [])
+        self.render_apps()
+
+    def render_apps(self):
+        while self.apps_box.count():
+            item = self.apps_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        everything = sorted((a for items in self.storage_apps.values() for a in items),
+                            key=lambda a: a["size"], reverse=True)
+        if not everything:
+            hint = QLabel("Scanning your drives..." if any(
+                self.drive_rows[r]["bar"].scanning for r in self.drive_rows)
+                else "No large apps or games found.")
+            hint.setObjectName("muted")
+            hint.setContentsMargins(16, 0, 16, 0)
+            self.apps_box.addWidget(hint)
+            return
+        shown = everything if self.apps_expanded else everything[:8]
+        top = everything[0]["size"] or 1
+        for app in shown:
+            kind = "Store app" if app["uwp"] else ("Game" if app["game"] else "App")
+            details = [kind] + ([app["publisher"]] if app["publisher"] else []) + (
+                [app["location"]] if app["location"] else [])
+            row = Row(app["name"], " · ".join(details))
+            row.sub.setWordWrap(True)
+            bar = Bar()
+            bar.set_value(app["size"] / top)
+            bar.setFixedWidth(120)
+            sz = QLabel(apps.human(app["size"]))
+            sz.setStyleSheet("font-size: 15px;")
+            sz.setFixedWidth(70)
+            sz.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            u = Button("Uninstall")
+            u.setCursor(Qt.PointingHandCursor)
+            u.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
+            u.clicked.connect(lambda _=False, a=app, b=u: self.uninstall_app(a, b))
+            row.right.addWidget(bar)
+            row.right.addWidget(sz)
+            row.right.addWidget(u)
+            self.apps_box.addWidget(row)
+        if len(everything) > 8:
+            more = Button("Show fewer" if self.apps_expanded else f"Show all {len(everything)}")
+            more.setFixedWidth(ROW_ACTION_BUTTON_WIDTH + 24)
+            more.clicked.connect(self.toggle_apps)
+            holder = QHBoxLayout()
+            holder.setContentsMargins(16, 8, 0, 0)
+            holder.addWidget(more)
+            holder.addStretch()
+            wrap = QWidget()
+            wrap.setLayout(holder)
+            self.apps_box.addWidget(wrap)
+
+    def toggle_apps(self):
+        self.apps_expanded = not self.apps_expanded
+        self.render_apps()
 
     def show_path(self, path, is_dir):
         if is_dir:
@@ -1731,26 +2198,87 @@ class Kernel(QWidget):
         self.no_match.setVisible(bool(q) and shown == 0)
 
     def build_specs(self):
-        page = QWidget()
-        pl = QVBoxLayout(page)
-        pl.setContentsMargins(20, 28, 20, 28)
-        t = QLabel("Specifications")
-        t.setObjectName("title")
-        pl.addWidget(t)
-        pl.addSpacing(16)
-        self.spec_view = SpecView()
-        self.spec_view.setPlainText("Detecting your hardware...")
-        SmoothScroller(self.spec_view)
-        pl.addWidget(self.spec_view, 1)
-        self.specs_ready.connect(self.spec_view.set_specs)
+        page = Page("Specifications")
+        self.add_monitor(page)
+
+        page.col.addSpacing(26)
+        header = QHBoxLayout()
+        label = QLabel("Hardware")
+        label.setObjectName("section")
+        header.addWidget(label)
+        header.addStretch()
+        self.copy_specs_btn = Button("Copy all")
+        self.copy_specs_btn.setFixedWidth(96)
+        self.copy_specs_btn.setEnabled(False)
+        self.copy_specs_btn.clicked.connect(self.copy_all_specs)
+        header.addWidget(self.copy_specs_btn)
+        page.col.addLayout(header)
+        page.col.addSpacing(8)
+
+        self.spec_rows = []
+        self.spec_text = ""
+        self.spec_placeholder = QLabel("Detecting your hardware...")
+        self.spec_placeholder.setObjectName("muted")
+        self.spec_placeholder.setContentsMargins(16, 0, 16, 0)
+        page.col.addWidget(self.spec_placeholder)
+        self.spec_box = QVBoxLayout()
+        self.spec_box.setSpacing(2)
+        page.col.addLayout(self.spec_box)
+        self.update_row = None
+        page.col.addStretch()
+        self.specs_ready.connect(self.show_specs)
+        self.updates_ready.connect(self.show_updates)
 
         def work():
             try:
-                self.specs_ready.emit(specs.collect())
+                pairs, windows = specs.collect()
             except Exception as ex:
-                self.specs_ready.emit([("Error", f"Could not detect specs ({ex})")])
+                self.specs_ready.emit([("Error", f"Could not detect specs ({ex})")], "")
+                return
+            self.specs_ready.emit(pairs, windows)
+            self.updates_ready.emit(specs.check_updates())
         threading.Thread(target=work, daemon=True).start()
         return page
+
+    def show_specs(self, pairs, windows):
+        self.spec_placeholder.hide()
+        lines = []
+        for key, value in pairs:
+            row = SpecRow(key, value)
+            self.spec_box.addWidget(row)
+            lines.append(f"{key}: " + value.replace("\n", "\n    "))
+        if windows:
+            button = Button("Windows Update")
+            button.setFixedWidth(140)
+            button.clicked.connect(lambda: os.startfile("ms-settings:windowsupdate"))
+            self.spec_box.addWidget(SpecRow("Windows version", windows))
+            self.update_row = SpecRow("Windows Update", "Checking for updates…", button, copyable=False)
+            self.spec_box.addWidget(self.update_row)
+            lines.append(f"Windows version: {windows}")
+        self.spec_text = "\n".join(lines)
+        self.copy_specs_btn.setEnabled(bool(lines))
+
+    def show_updates(self, result):
+        row = self.update_row
+        if row is None:
+            return
+        if result is None:
+            status = "Could not check for updates · open Windows Update to check manually"
+        elif result[0] == 0:
+            status = "Windows is up to date"
+        else:
+            count, titles = result
+            noun = "update" if count == 1 else "updates"
+            status = f"{count} {noun} available · {titles[0]}" if titles else f"{count} {noun} available"
+            if count > 1:
+                status += f" and {count - 1} more"
+        row.set_value(status)
+        row.set_attention(result is not None and result[0] > 0)
+
+    def copy_all_specs(self):
+        QApplication.clipboard().setText(self.spec_text)
+        self.copy_specs_btn.setText("Copied")
+        QTimer.singleShot(1200, lambda: self.copy_specs_btn.setText("Copy all"))
 
     def build_activity(self):
         page = QWidget()
@@ -1766,6 +2294,333 @@ class Kernel(QWidget):
         pl.addWidget(self.log, 1)
         return page
 
+    def add_monitor(self, page):
+        page.section("Live hardware metrics")
+        self.monitor_status = QLabel("Starting hardware sensors…")
+        self.monitor_status.setObjectName("muted")
+        self.monitor_status.setWordWrap(True)
+        self.monitor_status.setContentsMargins(16, 0, 16, 8)
+        page.col.addWidget(self.monitor_status)
+
+        self.monitor_cards = {}
+        groups = (
+            ("CPU", (
+                ("cpu_package", "CPU package temperature"),
+                ("cpu_hottest", "Hottest core"),
+                ("cpu_temperature", "Core average"),
+                ("cpu_clock", "CPU clock (avg / max)"),
+                ("cpu_power", "CPU package power"),
+                ("cpu_voltage", "CPU core voltage"),
+            )),
+            ("GPU", (
+                ("gpu_temperature", "GPU temperature"),
+                ("gpu_hotspot", "GPU hot spot"),
+                ("gpu_memory_junction", "VRAM junction temperature"),
+                ("gpu_clock", "GPU clock"),
+                ("gpu_memory", "GPU memory clock"),
+                ("gpu_load", "GPU load"),
+                ("gpu_vram", "VRAM usage"),
+                ("gpu_power", "GPU board power"),
+                ("gpu_voltage", "GPU core voltage"),
+                ("gpu_fan", "GPU fan speed"),
+            )),
+            ("Memory", (
+                ("ram", "Memory usage"),
+                ("ram_available", "Available memory"),
+                ("ram_committed", "Committed memory"),
+                ("ram_cached", "Cached memory"),
+            )),
+            ("System", (
+                ("cpu_utilization", "CPU utilization"),
+                ("processes", "Processes"),
+                ("threads", "Threads"),
+                ("handles", "Handles"),
+                ("uptime", "Uptime"),
+            )),
+        )
+        for group, items in groups:
+            label = page.section(group)
+            grid = QGridLayout()
+            grid.setContentsMargins(13, 0, 0, 0)
+            grid.setSpacing(10)
+            for column in range(3):
+                grid.setColumnStretch(column, 1)
+            for index, (key, title) in enumerate(items):
+                card = MetricCard(title)
+                self.monitor_cards[key] = card
+                grid.addWidget(card, index // 3, index % 3)
+            page.col.addLayout(grid)
+            if group == "CPU":
+                self.core_temperature_section = page.section("CPU core temperatures")
+                self.core_temperature_hint = QLabel("Per-core temperatures are hidden in average mode.")
+                self.core_temperature_hint.setObjectName("muted")
+                self.core_temperature_hint.setContentsMargins(16, 0, 16, 8)
+                page.col.addWidget(self.core_temperature_hint)
+                self.core_temperature_box = QWidget()
+                self.core_temperature_grid = QGridLayout(self.core_temperature_box)
+                self.core_temperature_grid.setContentsMargins(13, 0, 0, 0)
+                self.core_temperature_grid.setSpacing(10)
+                for column in range(3):
+                    self.core_temperature_grid.setColumnStretch(column, 1)
+                page.col.addWidget(self.core_temperature_box)
+
+        per_core = self.cfg.cpu_temp_mode == "per_core"
+        self.core_temperature_section.setVisible(per_core)
+        self.core_temperature_hint.setVisible(per_core)
+        self.core_temperature_box.setVisible(per_core)
+        self.monitor_cards["cpu_temperature"].setVisible(not per_core)
+
+        self.core_temperature_cards = []
+        self.monitor_process = None
+        self.monitor_thread = None
+        self.monitor_lock = threading.Lock()
+        self.monitor_started = False
+        self.monitor_stop = threading.Event()
+        self.monitor_sample.connect(self.update_monitor)
+        self.monitor_error.connect(self.show_monitor_error)
+        self.monitor_finished.connect(self.monitor_helper_finished)
+
+    def monitor_helper_path(self):
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        candidates = [
+            os.path.join(base, "monitor-helper", "kernel-monitor.exe"),
+            os.path.join(os.environ.get("TEMP", ""), "kernel-monitor-build", "kernel-monitor.exe"),
+        ]
+        return next((path for path in candidates if os.path.isfile(path)), None)
+
+    def start_monitor(self):
+        if self.monitor_started:
+            return
+        path = self.monitor_helper_path()
+        if not path:
+            self.monitor_status.setText(
+                "Hardware sensor helper is unavailable. Rebuild the app to include the monitor.")
+            return
+        self.monitor_started = True
+        self.monitor_stop.clear()
+        self.monitor_status.setText("Starting hardware sensors…")
+        self.monitor_thread = threading.Thread(
+            target=self.run_monitor_helper, args=(path,), name="kernel-monitor", daemon=True)
+        self.monitor_thread.start()
+
+    def run_monitor_helper(self, path):
+        process = None
+        exit_code = -1
+        details = ""
+        try:
+            process = subprocess.Popen(
+                [path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            with self.monitor_lock:
+                self.monitor_process = process
+            for raw in process.stdout:
+                if self.monitor_stop.is_set():
+                    break
+                if not raw.strip():
+                    continue
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as ex:
+                    self.monitor_error.emit(f"Sensor helper returned invalid data: {ex}")
+                    continue
+                if not isinstance(data, dict):
+                    self.monitor_error.emit(
+                        "Sensor helper returned an unexpected data format.")
+                    continue
+                self.monitor_sample.emit(data)
+            if self.monitor_stop.is_set() and process.poll() is None:
+                process.stdin.close()
+            try:
+                exit_code = process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                exit_code = process.wait(timeout=2)
+            details = process.stderr.read().strip()
+        except OSError as ex:
+            details = str(ex)
+            self.monitor_error.emit(f"Could not start the hardware sensor helper: {ex}")
+        finally:
+            if process is not None:
+                with self.monitor_lock:
+                    self.monitor_process = None
+                if process.stdout:
+                    process.stdout.close()
+                if process.stderr:
+                    process.stderr.close()
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+            self.monitor_finished.emit(exit_code, details)
+
+    def update_monitor(self, data):
+        self.latest_monitor_data = data
+        cards = self.monitor_cards
+
+        def number(key):
+            value = data.get(key)
+            return value if isinstance(value, (int, float)) and math.isfinite(value) else None
+
+        def show(card, key, fmt):
+            value = number(key)
+            cards[card].set_value("Unavailable" if value is None else fmt.format(value))
+
+        show("cpu_utilization", "cpuLoadPercent", "{:.0f}%")
+        show("cpu_power", "cpuPowerW", "{:.1f} W")
+        show("cpu_voltage", "cpuVoltageV", "{:.3f} V")
+        show("gpu_memory", "gpuMemoryClockMHz", "{:.0f} MHz")
+        show("gpu_clock", "gpuClockMHz", "{:.0f} MHz")
+        show("gpu_load", "gpuLoadPercent", "{:.0f}%")
+        show("gpu_power", "gpuPowerW", "{:.1f} W")
+        show("gpu_voltage", "gpuVoltageV", "{:.3f} V")
+        show("gpu_fan", "gpuFanRpm", "{:.0f} RPM")
+        clock, clock_max = number("cpuClockMHz"), number("cpuClockMaxMHz")
+        if clock is None:
+            cards["cpu_clock"].set_value("Unavailable")
+        elif clock_max is not None:
+            cards["cpu_clock"].set_value(f"{clock:.0f} / {clock_max:.0f} MHz")
+        else:
+            cards["cpu_clock"].set_value(f"{clock:.0f} MHz")
+        self.set_temperature_card(cards["cpu_package"], number("cpuPackageTemperature"))
+        self.set_temperature_card(cards["cpu_hottest"], number("cpuHottestCoreTemperature"))
+        self.set_temperature_card(cards["gpu_temperature"], number("gpuTemperature"))
+        self.set_temperature_card(cards["gpu_hotspot"], number("gpuHotSpotTemperature"))
+        self.set_temperature_card(cards["gpu_memory_junction"], number("gpuMemoryJunctionTemperature"))
+
+        vram_used, vram_total = number("gpuMemoryUsedMB"), number("gpuMemoryTotalMB")
+        if vram_used is not None and vram_total:
+            percent = vram_used * 100 / vram_total
+            cards["gpu_vram"].set_value(
+                f"{vram_used / 1024:.1f} / {vram_total / 1024:.1f} GB ({percent:.0f}%)")
+            cards["gpu_vram"].set_alert(percent >= 90)
+        else:
+            cards["gpu_vram"].set_value("Unavailable")
+            cards["gpu_vram"].set_alert(False)
+        cards["ram"].set_value("Unavailable")
+        cards["ram"].set_alert(False)
+        used, total = number("ramUsedBytes"), number("ramTotalBytes")
+        gb = 1024 ** 3
+        if used is not None and total:
+            percent = used * 100 / total
+            cards["ram"].set_value(f"{used / gb:.1f} / {total / gb:.1f} GB ({percent:.0f}%)")
+            cards["ram"].set_alert(percent >= 90)
+        available, cached = number("ramAvailableBytes"), number("cachedBytes")
+        cards["ram_available"].set_value(
+            "Unavailable" if available is None else f"{available / gb:.1f} GB")
+        cards["ram_cached"].set_value("Unavailable" if cached is None else f"{cached / gb:.1f} GB")
+        commit, limit = number("commitTotalBytes"), number("commitLimitBytes")
+        if commit is not None and limit:
+            percent = commit * 100 / limit
+            cards["ram_committed"].set_value(f"{commit / gb:.1f} / {limit / gb:.1f} GB ({percent:.0f}%)")
+            cards["ram_committed"].set_alert(percent >= 90)
+        else:
+            cards["ram_committed"].set_value("Unavailable")
+            cards["ram_committed"].set_alert(False)
+        for card, key in (("processes", "processCount"), ("threads", "threadCount"),
+                          ("handles", "handleCount")):
+            count = number(key)
+            cards[card].set_value("Unavailable" if count is None else f"{count:,.0f}")
+        uptime = number("uptimeSeconds")
+        if uptime is None:
+            cards["uptime"].set_value("Unavailable")
+        else:
+            days, rest = divmod(int(uptime), 86400)
+            hours, rest = divmod(rest, 3600)
+            minutes, seconds = divmod(rest, 60)
+            cards["uptime"].set_value(
+                f"{days}d {hours}h {minutes}m" if days else f"{hours}h {minutes}m {seconds}s")
+
+        temperatures = data.get("cpuCoreTemperatures")
+        if not isinstance(temperatures, list):
+            temperatures = []
+        temperatures = [value for value in temperatures
+                        if isinstance(value, (int, float)) and math.isfinite(value)]
+        average_card = self.monitor_cards["cpu_temperature"]
+        if self.cfg.cpu_temp_mode == "average":
+            average_card.show()
+            self.core_temperature_section.hide()
+            self.core_temperature_hint.hide()
+            self.core_temperature_box.hide()
+            if temperatures:
+                self.set_temperature_card(average_card, sum(temperatures) / len(temperatures))
+            else:
+                self.set_temperature_card(average_card, None)
+        else:
+            average_card.hide()
+            self.core_temperature_section.show()
+            self.core_temperature_box.show()
+            self.core_temperature_hint.setText(
+                "Each available CPU core temperature is shown separately."
+                if temperatures else "CPU core temperature sensors are unavailable.")
+            self.core_temperature_hint.show()
+            while len(self.core_temperature_cards) < len(temperatures):
+                index = len(self.core_temperature_cards)
+                card = MetricCard(f"Core {index + 1}")
+                self.core_temperature_grid.addWidget(card, index // 3, index % 3)
+                self.core_temperature_cards.append(card)
+            for index, card in enumerate(self.core_temperature_cards):
+                visible = index < len(temperatures)
+                card.setVisible(visible)
+                if visible:
+                    self.set_temperature_card(card, temperatures[index])
+        errors = data.get("hardwareErrors")
+        if isinstance(errors, list) and errors:
+            details = "; ".join(str(error) for error in errors[:3])
+            self.monitor_status.setText(f"Live · some sensors unavailable: {details}")
+        elif data.get("nvidiaGpuDetected") is False:
+            self.monitor_status.setText(
+                "NVIDIA GPU sensors not detected · CPU, memory, and process tracking remain active.")
+        else:
+            status = f"Live · updated {time.strftime('%H:%M:%S')}"
+            if data.get("cpuClockMHz") is None:
+                status += " · CPU clock unavailable"
+            if data.get("cpuTemperatureAvailable") is False:
+                if data.get("cpuDetected") is False:
+                    status += " · CPU hardware not detected"
+                elif data.get("isElevated") is False:
+                    status += " · run as administrator for CPU sensor access"
+                elif not self.pawnio_installed():
+                    status += " · CPU temperature needs the free PawnIO driver (pawnio.eu), which is not installed"
+                elif isinstance(data.get("cpuTemperatureSensorCount"), (int, float)) \
+                        and data["cpuTemperatureSensorCount"] > 0:
+                    status += " · CPU temperature sensors detected but returning no readings"
+                else:
+                    status += " · CPU temperature sensor unavailable"
+            self.monitor_status.setText(status)
+
+    @staticmethod
+    def pawnio_installed():
+        try:
+            import winreg
+            winreg.CloseKey(winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\PawnIO"))
+            return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def set_temperature_card(card, temperature):
+        if temperature is None:
+            card.set_value("Unavailable")
+            card.set_temperature(None)
+        elif temperature >= 80:
+            card.set_value(f"{temperature:.0f} °C · HOT")
+            card.set_temperature(temperature)
+        else:
+            card.set_value(f"{temperature:.0f} °C")
+            card.set_temperature(temperature)
+
+    def show_monitor_error(self, message):
+        self.monitor_status.setText(message)
+
+    def monitor_helper_finished(self, exit_code, details):
+        self.monitor_started = False
+        if exit_code == 0:
+            return
+        message = f"Hardware sensor helper stopped (exit code {exit_code})."
+        if details:
+            message = f"{message} {details}"
+        self.monitor_status.setText(message)
+
     def build_settings(self):
         page = Page("Settings")
         page.section("Interface")
@@ -1774,6 +2629,16 @@ class Kernel(QWidget):
         smooth.toggle.toggled.connect(self.set_smooth)
         self.smooth_toggle = smooth.toggle
         page.add(smooth)
+        temp = Row(
+            "CPU temperature tracking",
+            "Show the average of available CPU core sensors or each core separately")
+        self.cpu_temp_combo = QComboBox()
+        self.cpu_temp_combo.addItem("Average of cores", "average")
+        self.cpu_temp_combo.addItem("Per core", "per_core")
+        self.cpu_temp_combo.setCurrentIndex(self.cpu_temp_combo.findData(self.cfg.cpu_temp_mode))
+        self.cpu_temp_combo.currentIndexChanged.connect(lambda: self.set_cpu_temp_mode())
+        temp.right.addWidget(self.cpu_temp_combo)
+        page.add(temp)
         page.section("Downloads")
         self.dl_row = Row("Download location", self.cfg.download_dir)
         for text, fn in (("Change", self.pick_dir), ("Open", self.open_dir)):
@@ -1790,6 +2655,25 @@ class Kernel(QWidget):
         page.add(prof)
         page.col.addStretch()
         return page
+
+    def set_cpu_temp_mode(self):
+        self.cfg.cpu_temp_mode = self.cpu_temp_combo.currentData()
+        self.cfg.save()
+        if hasattr(self, "latest_monitor_data"):
+            self.update_monitor(self.latest_monitor_data)
+
+    def sync_nvidia_controls(self, apply=False):
+        self.gamma_contrast_timer.stop()
+        for slider, value in ((self.gamma_slider, self.cfg.nvidia_gamma),
+                              (self.contrast_slider, self.cfg.nvidia_contrast)):
+            slider.blockSignals(True)
+            slider.setValue(value)
+            slider.blockSignals(False)
+        self.gamma_value.setText(f"{self.cfg.nvidia_gamma / 100:.2f}")
+        self.contrast_value.setText(f"{self.cfg.nvidia_contrast}%")
+        if (apply and self.nvidia_control is not None
+                and self.nvidia_control.supports_gamma_contrast):
+            self.apply_gamma_contrast()
 
     def set_smooth(self, on):
         SmoothScroller.on = on
@@ -1857,6 +2741,8 @@ class Kernel(QWidget):
             row.set_active(is_active(fn))
         self.dl_row.sub.setText(self.cfg.download_dir)
         self.smooth_toggle.set_quiet(self.cfg.smooth_scroll)
+        self.cpu_temp_combo.setCurrentIndex(self.cpu_temp_combo.findData(self.cfg.cpu_temp_mode))
+        self.sync_nvidia_controls(apply=True)
         SmoothScroller.on = self.cfg.smooth_scroll
         self.update_status()
         self.save_toggle_states()
@@ -1888,6 +2774,21 @@ class Kernel(QWidget):
         if not (self.isMaximized() or self.isFullScreen()):
             self.cfg.win_size = [self.width(), self.height()]
         self.cfg.save()
+        if getattr(self, "monitor_started", False):
+            self.monitor_stop.set()
+            with self.monitor_lock:
+                process = self.monitor_process
+            if process is not None and process.poll() is None:
+                try:
+                    process.stdin.close()
+                except (AttributeError, OSError):
+                    pass
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+            if self.monitor_thread is not None:
+                self.monitor_thread.join(timeout=2)
         for j in self.jobs.jobs:
             j.request_cancel()
         super().closeEvent(e)

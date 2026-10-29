@@ -1,8 +1,31 @@
 import ctypes
+import json
 import os
+import re
 import shutil
 import string
+import subprocess
+import winreg
 from concurrent.futures import ThreadPoolExecutor
+
+NOWIN = 0x08000000  # CREATE_NO_WINDOW
+MIN_APP_BYTES = 50 * 1024 ** 2
+GAME_DIRS = ("\\steamapps\\", "\\epic games\\", "\\gog galaxy\\games\\", "\\gog games\\", "\\riot games\\",
+             "\\xboxgames\\", "\\ubisoft game launcher\\games\\", "\\ea games\\", "\\origin games\\",
+             "\\rockstar games\\")
+UNINSTALL_KEYS = (
+    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+    (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+)
+APPX_SCRIPT = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$start = @{}
+Get-StartApps | ForEach-Object { $f = ($_.AppID -split '!')[0]; if ($f -and -not $start.ContainsKey($f)) { $start[$f] = $_.Name } }
+@(Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.SignatureKind -ne 'System' -and $_.InstallLocation -and $start[$_.PackageFamilyName] } | ForEach-Object {
+  [pscustomobject]@{ name = $start[$_.PackageFamilyName]; location = $_.InstallLocation }
+}) | ConvertTo-Json -Compress
+"""
 
 
 def drives():
@@ -59,22 +82,242 @@ def _entry_size(entry):
         return None
 
 
-def largest(folder, limit=10):
-    """Biggest direct children of folder: [(path, bytes, is_dir)]."""
+def sized_children(folder):
+    """Every direct child of folder: [(path, bytes, is_dir)]."""
     try:
         entries = list(os.scandir(folder))
     except OSError:
         return []
     with ThreadPoolExecutor(8) as pool:
-        sized = [r for r in pool.map(_entry_size, entries) if r]
+        return [r for r in pool.map(_entry_size, entries) if r]
+
+
+def largest(folder, limit=10):
+    """Biggest direct children of folder: [(path, bytes, is_dir)]."""
+    sized = sized_children(folder)
     sized.sort(key=lambda r: r[1], reverse=True)
     return sized[:limit]
 
 
-def analyze(root):
-    """Top-level hogs for a drive plus the biggest items inside the user profile (if on that drive)."""
-    result = {"root": largest(root, 10), "user": []}
+def _norm(path):
+    return os.path.normcase(os.path.normpath(path))
+
+
+def _protected_dirs():
+    keys = ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData",
+            "USERPROFILE", "LOCALAPPDATA", "APPDATA")
+    return {_norm(os.environ[k]) for k in keys if os.environ.get(k)}
+
+
+def _usable_location(path):
+    n = _norm(path)
+    if os.path.splitdrive(n)[1] in ("", "\\") or n in _protected_dirs():
+        return False
+    win = _norm(os.environ.get("SystemRoot", "C:\\Windows"))
+    return not (n == win or n.startswith(win + "\\")) and os.path.isdir(path)
+
+
+def _unquote_path(text):
+    if not text:
+        return None
+    text = str(text).strip()
+    if text.startswith('"'):
+        return text[1:].split('"')[0] or None
+    return text.split(",")[0].strip() or None
+
+
+def _reg_value(key, name):
+    try:
+        return winreg.QueryValueEx(key, name)[0]
+    except OSError:
+        return None
+
+
+def _is_game(name, location):
+    low = f"{location or ''}\\".lower()
+    if "launcher" in name.lower() or name.lower() == "steam":
+        return False
+    return any(part in low for part in GAME_DIRS)
+
+
+def _registry_apps():
+    wanted = ("DisplayName", "UninstallString", "InstallLocation", "DisplayIcon", "EstimatedSize",
+              "Publisher", "SystemComponent", "ParentKeyName", "ReleaseType")
+    seen, out = set(), []
+    for hive, path in UNINSTALL_KEYS:
+        try:
+            base = winreg.OpenKey(hive, path)
+        except OSError:
+            continue
+        with base:
+            for i in range(winreg.QueryInfoKey(base)[0]):
+                try:
+                    with winreg.OpenKey(base, winreg.EnumKey(base, i)) as key:
+                        v = {n: _reg_value(key, n) for n in wanted}
+                except OSError:
+                    continue
+                name = " ".join(str(v["DisplayName"] or "").split())
+                command = v["UninstallString"]
+                if (not name or not command or v["SystemComponent"] == 1 or v["ParentKeyName"]
+                        or v["ReleaseType"] in ("Update", "Hotfix", "Security Update")
+                        or re.match(r"(KB\d+|Update for|Security Update)", name) or name.lower() in seen):
+                    continue
+                seen.add(name.lower())
+                location = _unquote_path(v["InstallLocation"])
+                if not location:
+                    icon = _unquote_path(v["DisplayIcon"])
+                    if icon:
+                        location = os.path.dirname(icon) if os.path.splitext(icon)[1] else icon
+                if location and not _usable_location(location):
+                    location = None
+                estimate = v["EstimatedSize"] * 1024 if isinstance(v["EstimatedSize"], int) else 0
+                out.append({"name": name, "publisher": str(v["Publisher"] or ""), "location": location,
+                            "estimate": estimate, "command": re.sub(r"(?i)msiexec(\.exe)?\s+/i", "MsiExec.exe /X",
+                                                                    str(command)),
+                            "uri": None, "uwp": False})
+    return out
+
+
+def _appx_apps():
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", APPX_SCRIPT],
+                           capture_output=True, text=True, creationflags=NOWIN, timeout=60)
+        data = json.loads(r.stdout) if r.stdout.strip() else []
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    return [{"name": d["name"], "publisher": "", "location": d["location"], "estimate": 0,
+             "command": None, "uri": "ms-settings:appsfeatures", "uwp": True} for d in data if d.get("name")]
+
+
+def _steam_apps():
+    """Steam games from each library's appmanifest files (Steam does not register uninstallers)."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam") as key:
+            steam = _reg_value(key, "SteamPath")
+    except OSError:
+        return []
+    if not steam:
+        return []
+    libraries = {_norm(steam): steam}
+    try:
+        with open(os.path.join(steam, "steamapps", "libraryfolders.vdf"), encoding="utf-8", errors="replace") as f:
+            for raw in re.findall(r'"path"\s+"([^"]+)"', f.read()):
+                path = raw.replace("\\\\", "\\")
+                libraries.setdefault(_norm(path), path)
+    except OSError:
+        pass
+    out = []
+    for library in libraries.values():
+        folder = os.path.join(library, "steamapps")
+        try:
+            names = [n for n in os.listdir(folder) if n.startswith("appmanifest_") and n.endswith(".acf")]
+        except OSError:
+            continue
+        for n in names:
+            try:
+                with open(os.path.join(folder, n), encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+                app_id = re.search(r'"appid"\s+"(\d+)"', text).group(1)
+                name = re.search(r'"name"\s+"([^"]+)"', text).group(1)
+                install = re.search(r'"installdir"\s+"([^"]+)"', text).group(1)
+            except (OSError, AttributeError):
+                continue
+            size = re.search(r'"SizeOnDisk"\s+"(\d+)"', text)
+            out.append({"name": name.replace("\\\\", "\\"), "publisher": "Steam",
+                        "location": os.path.join(folder, "common", install), "estimate": int(size.group(1)) if size else 0,
+                        "command": None, "uri": f"steam://uninstall/{app_id}", "uwp": False})
+    return out
+
+
+def installed_apps():
+    """Installed desktop apps, Steam games and Store apps with sizes: list of dicts."""
+    items = _registry_apps() + _steam_apps() + _appx_apps()
+    with ThreadPoolExecutor(8) as pool:
+        sizes = list(pool.map(lambda it: size_of(it["location"]) if it["location"] else it["estimate"], items))
+    kept, seen = [], set()
+    for it, size in sorted(zip(items, sizes), key=lambda p: p[1], reverse=True):
+        key = _norm(it["location"]) if it["location"] else None
+        if size < MIN_APP_BYTES or key in seen:
+            continue
+        seen.add(key)
+        it["size"] = size
+        it["game"] = _is_game(it["name"], it["location"]) or "\\xboxgames\\" in f"{it['location']}\\".lower()
+        kept.append(it)
+    # Drop apps that merely contain other listed apps (a launcher holding its games, for example).
+    paths = [_norm(it["location"]) + "\\" for it in kept if it["location"]]
+    result = []
+    for it in kept:
+        mine = _norm(it["location"]) + "\\" if it["location"] else None
+        if mine and any(p != mine and p.startswith(mine) for p in paths):
+            continue
+        result.append(it)
+    return result
+
+
+CATEGORIES = ("Apps", "Games", "Documents & files", "System", "Other")
+SYSTEM_ENTRIES = {"windows", "$recycle.bin", "system volume information", "recovery", "$windows.~bt",
+                  "$winreagent", "windows.old", "pagefile.sys", "hiberfil.sys", "swapfile.sys", "config.msi",
+                  "msocache", "$sysreset", "boot", "bootmgr", "perflogs", "$sysreset", "documents and settings"}
+APP_ENTRIES = {"program files", "program files (x86)", "programdata", "windowsapps"}
+
+
+def _top_category(name):
+    name = name.lower()
+    if name in SYSTEM_ENTRIES:
+        return "System"
+    if name in APP_ENTRIES:
+        return "Apps"
+    if name == "users":
+        return "Documents & files"
+    if any(w in name for w in ("game", "steam", "epic", "gog", "riot")):
+        return "Games"
+    return "Other"
+
+
+def categorize(root, entries, apps, used):
+    """Bytes used per category. Apps found in other folders (a user profile, a library) are moved
+    out of the folder bucket they live in, so the total never grows."""
+    cats = dict.fromkeys(CATEGORIES, 0)
+    bucket = {}
+    for path, size, _ in entries:
+        cat = _top_category(os.path.basename(path))
+        cats[cat] += size
+        bucket[_norm(path)] = cat
+    for app in apps:
+        if not app["location"]:
+            continue
+        rel = os.path.relpath(app["location"], root)
+        source = bucket.get(_norm(os.path.join(root, rel.split("\\")[0])))
+        target = "Games" if app["game"] else "Apps"
+        if source and source != target:
+            moved = min(app["size"], cats[source])
+            cats[source] -= moved
+            cats[target] += moved
+    # Locked files and protected folders cannot be read; they are system reserved space.
+    cats["System"] += max(0, used - sum(cats.values()))
+    return [(name, cats[name]) for name in CATEGORIES if cats[name] > 0]
+
+
+def analyze(root, apps=None):
+    """Category breakdown, top-level hogs, the biggest items in the user profile (if on that drive)
+    and the largest installed apps and games on the drive."""
+    entries = sized_children(root)
+    biggest = sorted(entries, key=lambda r: r[1], reverse=True)[:10]
+    result = {"root": biggest, "user": [], "categories": [], "apps": []}
+    drive = os.path.splitdrive(root)[0].upper()
     profile = os.path.expanduser("~")
-    if os.path.splitdrive(profile)[0].upper() == os.path.splitdrive(root)[0].upper():
+    if os.path.splitdrive(profile)[0].upper() == drive:
         result["user"] = largest(profile, 10)
+    try:
+        total, used, _ = shutil.disk_usage(root)
+        if apps is None:
+            apps = installed_apps()
+    except OSError:
+        total, used, apps = 0, sum(r[1] for r in entries), []
+    system_drive = os.path.splitdrive(os.environ.get("SystemRoot", "C:\\Windows"))[0].upper()
+    here = [a for a in apps if (os.path.splitdrive(a["location"])[0].upper() if a["location"] else system_drive) == drive]
+    result["categories"] = categorize(root, entries, [a for a in here if a["location"]], used)
+    result["apps"] = here[:15]
     return result
