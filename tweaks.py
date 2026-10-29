@@ -228,6 +228,11 @@ def t_widgets(log):
     _set_widgets_toggle(False, log)
 
 
+def t_lock_screen_widgets(log):
+    set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Dsh", "DisableWidgetsOnLockScreen", 1)
+    log("Widgets disabled on the Windows lock screen.")
+
+
 def t_power(log):
     ultimate = "e9a42b02-d5df-448d-aa00-03f14749eb61"
     result = subprocess.run(["powercfg", "/setactive", ultimate], capture_output=True, text=True,
@@ -436,6 +441,8 @@ ACTIVE_CHECKS = {
         ("AppsUseLightTheme", "SystemUsesLightTheme"), 0),
     "t_power": _active_power,
     "t_widgets": _active_widgets,
+    "t_lock_screen_widgets": lambda: _reg(
+        HKLM, r"SOFTWARE\Policies\Microsoft\Dsh", "DisableWidgetsOnLockScreen") == 1,
     "t_time_format": lambda: _reg(HKCU, r"Control Panel\International", "sShortDate") == "MMM d, yyyy",
     "t_end_task": lambda: _reg(
         HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings",
@@ -506,6 +513,8 @@ def revert_tweak(fn, log):
             raise RuntimeError(out[-300:])
     elif name == "t_widgets":
         _set_widgets_toggle(True, log)
+    elif name == "t_lock_screen_widgets":
+        _delete_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Dsh", "DisableWidgetsOnLockScreen")
     elif name == "t_time_format":
         set_str(HKCU, r"Control Panel\International", "sShortDate", "M/d/yyyy")
         broadcast_setting("intl")
@@ -911,6 +920,7 @@ TASKS = [
     ("System", "Enable Group Policy Editor", "Installs pro version of gpeditor on to your system", t_group_policy),
     ("Performance", "Ultimate performance", "Activate the maximum performance power plan", t_power),
     ("Appearance", "Hide Widgets & Chat", "Remove the taskbar buttons", t_widgets),
+    ("Appearance", "Disable lock screen widgets", "Remove widgets from the Windows sign-in screen", t_lock_screen_widgets),
     ("Appearance", "Taskbar date format", "Show the date as MMM d, yyyy (e.g. Dec 31, 2030)", t_time_format),
     ("Appearance", "Enable End Task in taskbar", "Adds 'End task' to the right-click menu of taskbar apps", t_end_task),
     ("Appearance", "Disable Windows sounds", "Sound scheme to 'No Sounds' and no startup chime", t_sounds),
