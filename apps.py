@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -16,6 +17,25 @@ import urllib.request
 from urllib.parse import unquote, urlparse
 
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
+
+
+def _ssl_context():
+    """Windows' certificate store plus certifi's bundle: a fresh PC or VM often lacks the root
+    certificates GitHub and CDNs use until Windows fetches them, which breaks HTTPS downloads."""
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(certifi.where())
+    except Exception:
+        pass
+    return ctx
+
+
+_SSL = _ssl_context()
+
+
+def _open(req, timeout=30):
+    return urllib.request.urlopen(req, timeout=timeout, context=_SSL)
 
 # Apps with no winget package: a stable publisher link that redirects to the current installer
 DIRECT = {"UniversalAudio.UAConnect": "https://www.uaudio.com/apps/uaconnect/win/installer"}
@@ -46,25 +66,20 @@ CATALOG = [
     ("Hardware", "Elgato Stream Deck", "Elgato.StreamDeck", "elgato.com"),
     ("Firmware", "UA Connect", "UniversalAudio.UAConnect", "uaudio.com"),
     ("Firmware", "Logitech G HUB", "Logitech.GHUB", "logitechg.com"),
-    ("Firmware", "Logi Options+", "Logitech.OptionsPlus", "logitech.com"),
     ("Firmware", "Corsair iCUE 5", "Corsair.iCUE.5", "corsair.com"),
     ("Firmware", "SteelSeries GG", "SteelSeries.GG", "steelseries.com"),
     ("Firmware", "Focusrite Control 2", "FocusriteAudioEngineeringLtd.FocusriteControl2", "focusrite.com"),
     ("Firmware", "Elgato Camera Hub", "Elgato.CameraHub", "elgato.com"),
-    ("Firmware", "Wacom Tablet Driver", "Wacom.WacomTabletDriver", "wacom.com"),
     ("Firmware", "Crucial Storage Executive", "Crucial.StorageExecutive", "crucial.com"),
     ("Firmware", "Kingston SSD Manager", "Kingston.SSDManager", "kingston.com"),
-    ("Firmware", "ASUS Armoury Crate", "Asus.ArmouryCrate", "asus.com"),
+    ("Firmware", "DirectX", "Microsoft.DirectX", "microsoft.com"),
     ("Firmware", "MSI Center", "MSI.MSICenter", "msi.com"),
-    ("Firmware", "Dell Command | Update", "Dell.CommandUpdate", "dell.com"),
-    ("Firmware", "Lenovo System Update", "Lenovo.SystemUpdate", "lenovo.com"),
-    ("Firmware", "HP Support Assistant", "HP.SupportAssistant", "hp.com"),
     ("Media", "OBS Studio", "OBSProject.OBSStudio", "obsproject.com"),
     ("Media", "VLC", "VideoLAN.VLC", "videolan.org"),
     ("Media", "Spotify", "Spotify.Spotify", "spotify.com"),
     ("Media", "Audacity", "Audacity.Audacity", "audacityteam.org"),
     ("Media", "HandBrake", "HandBrake.HandBrake", "handbrake.fr"),
-    ("Utilities", "7-Zip", "7zip.7zip", "7-zip.org"),
+    ("Utilities", "NanaZip", "M2Team.NanaZip", "github.com"),
     ("Utilities", "Notepad++", "Notepad++.Notepad++", "notepad-plus-plus.org"),
     ("Utilities", "Everything", "voidtools.Everything", "voidtools.com"),
     ("Utilities", "PowerToys", "Microsoft.PowerToys", "microsoft.com"),
@@ -77,7 +92,6 @@ CATALOG = [
     ("Utilities", "CPU-Z", "CPUID.CPU-Z", "cpuid.com"),
     ("Utilities", "HWMonitor", "CPUID.HWMonitor", "cpuid.com"),
     ("Utilities", "GPU-Z", "TechPowerUp.GPU-Z", "techpowerup.com"),
-    ("Utilities", "WinSCP", "WinSCP.WinSCP", "winscp.net"),
     ("Utilities", "Blur AutoClicker", "Blur009.BlurAutoClicker", "github.com"),
     ("Utilities", "IObit Unlocker", "IObit.IObitUnlocker", "iobit.com"),
     ("Utilities", "MacType", "MacType.MacType", "github.com"),
@@ -89,6 +103,8 @@ CATALOG = [
     ("Developer", "Windows Terminal", "Microsoft.WindowsTerminal", "microsoft.com"),
     ("Developer", "Python 3", "Python.Python.3.13", "python.org"),
     ("Developer", "Node.js LTS", "OpenJS.NodeJS.LTS", "nodejs.org"),
+    ("Developer", "GitHub Desktop", "GitHub.GitHubDesktop", "desktop.github.com"),
+    ("Developer", "WinSCP", "WinSCP.WinSCP", "winscp.net"),
     ("Media", "Figma", "Figma.Figma", "figma.com"),
 ]
 
@@ -167,14 +183,57 @@ def _ok(rc, text):
     return rc == 0 or any(h in text.lower() for h in OK_HINTS)
 
 
+def _version_key(v):
+    return [int(x) if x.isdigit() else 0 for x in re.split(r"[.\-+_]", v)]
+
+
+def _github_manifest(pkg_id):
+    """Installer URL / hash straight from the winget-pkgs repository when winget itself is
+    missing or not initialised yet (common on a fresh install)."""
+    api = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/"
+    parts = pkg_id.split(".")
+    path = f"{parts[0][0].lower()}/" + "/".join(parts)
+    for _ in range(4):
+        data, _ = _get(api + path)
+        if not data:
+            return {}
+        try:
+            entries = json.loads(data)
+        except ValueError:
+            return {}
+        installer = next((e for e in entries if e["name"].endswith(".installer.yaml")), None)
+        if installer:
+            text, _ = _get(installer["download_url"])
+            break
+        dirs = [e["name"] for e in entries if e["type"] == "dir"]
+        if not dirs:
+            return {}
+        path += "/" + max(dirs, key=_version_key)
+    else:
+        return {}
+    text = text.decode("utf-8", "replace") if text else ""
+    version = re.search(r"^PackageVersion:\s*(\S+)", text, re.M)
+    top_type = re.search(r"^InstallerType:\s*(\S+)", text, re.M)
+    blocks = re.split(r"^\s*-\s+(?=Architecture:)", text, flags=re.M)[1:]
+    chosen = next((b for b in blocks if re.search(r"Architecture:\s*x64", b)), blocks[0] if blocks else "")
+    url = re.search(r"InstallerUrl:\s*(\S+)", chosen)
+    if not url:
+        return {}
+    sha = re.search(r"InstallerSha256:\s*([0-9a-fA-F]{64})", chosen)
+    kind = re.search(r"InstallerType:\s*(\S+)", chosen) or top_type
+    return {"url": url.group(1), "version": version.group(1) if version else "",
+            "sha": sha.group(1) if sha else None, "type": (kind.group(1) if kind else "").lower(),
+            "home": None}
+
+
 def show(pkg_id):
     """Read the publisher installer URL / hash / homepage from the winget manifest."""
     if pkg_id in DIRECT:
         return _direct(DIRECT[pkg_id])
     rc, text = winget(["show", "--id", pkg_id, "-e", "--source", "winget",
-                       "--accept-source-agreements"])
+                       "--accept-source-agreements"]) if winget_path() else (1, "")
     if rc != 0:
-        return {}
+        return _github_manifest(pkg_id)
 
     def grab(pattern):
         m = re.search(pattern, text, re.I | re.M)
@@ -191,7 +250,7 @@ def show(pkg_id):
 def _direct(url):
     try:
         req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "Mozilla/5.0 kernel/1.0"})
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with _open(req, timeout=20) as r:
             final = r.geturl()
     except Exception:
         return {}
@@ -200,13 +259,20 @@ def _direct(url):
     return {"url": final, "version": version, "sha": None, "type": "exe", "home": None}
 
 
+def _headers(url):
+    # SourceForge only redirects to the real file for command-line style clients
+    ua = "Wget/1.21" if "sourceforge.net" in (urlparse(url).hostname or "") else "Mozilla/5.0 kernel/1.0"
+    return {"User-Agent": ua}
+
+
 def remote_size(url):
     """Installer size in bytes without downloading it (HEAD, then a 1-byte ranged GET)."""
     for method, extra in (("HEAD", {}), ("GET", {"Range": "bytes=0-0"})):
         try:
-            req = urllib.request.Request(url, method=method,
-                                         headers={"User-Agent": "Mozilla/5.0 kernel/1.0", **extra})
-            with urllib.request.urlopen(req, timeout=15) as r:
+            req = urllib.request.Request(url, method=method, headers={**_headers(url), **extra})
+            with _open(req, timeout=15) as r:
+                if "text/html" in r.headers.get("Content-Type", ""):
+                    continue
                 rng = r.headers.get("Content-Range", "")
                 if "/" in rng and rng.rsplit("/", 1)[1].isdigit():
                     return int(rng.rsplit("/", 1)[1])
@@ -232,26 +298,30 @@ def _info_cache():
 
 
 def info(pkg_id, refresh=False):
-    """(version, size_bytes) of the installer that Download would fetch. Cached for 12 hours."""
+    """(version, size_bytes, source_url) of the installer that Download would fetch.
+    Cached for 12 hours, but an unknown size is retried after a few minutes."""
     with _info_lock:
         hit = _info_cache().get(pkg_id)
-    if hit and not refresh and time.time() - hit["t"] < INFO_TTL:
-        return hit["version"], hit["size"]
+    if hit and not refresh and hit.get("url"):
+        age = time.time() - hit["t"]
+        if age < (INFO_TTL if hit["size"] else 300):
+            return hit["version"], hit["size"], hit["url"]
     data = show(pkg_id) or show(pkg_id)
     version = data.get("version") or ""
-    size = remote_size(data["url"]) if data.get("url") else 0
-    if size < 512 * 1024:  # redirect/landing pages, not the real installer
+    url = data.get("url") or ""
+    size = remote_size(url) if url else 0
+    if size < 100 * 1024:  # redirect/landing pages, not the real installer
         size = 0
-    if version:
+    if version and url:
         with _info_lock:
             cache = _info_cache()
-            cache[pkg_id] = {"version": version, "size": size, "t": time.time()}
+            cache[pkg_id] = {"version": version, "size": size, "url": url, "t": time.time()}
             os.makedirs(os.path.dirname(INFO_FILE), exist_ok=True)
             with open(INFO_FILE, "w", encoding="utf-8") as f:
                 json.dump(cache, f)
     elif hit:
-        return hit["version"], hit["size"]
-    return version, size
+        return hit["version"], hit["size"], hit.get("url", "")
+    return version, size, url
 
 
 def fetch_file(url, dest_dir, sha, kind, job):
@@ -261,10 +331,12 @@ def fetch_file(url, dest_dir, sha, kind, job):
         name += "." + EXT.get(kind, "exe")
     final = os.path.join(dest_dir, name)
     part = final + ".part"
-    req = urllib.request.Request(url, headers={"User-Agent": "kernel/1.0"})
+    req = urllib.request.Request(url, headers=_headers(url))
     ok = False
     try:
-        with urllib.request.urlopen(req, timeout=30) as r, open(part, "wb") as f:
+        with _open(req, timeout=30) as r, open(part, "wb") as f:
+            if "text/html" in r.headers.get("Content-Type", ""):
+                raise RuntimeError("The publisher returned a web page instead of the installer")
             total = int(r.headers.get("Content-Length") or 0)
             h = hashlib.sha256()
             done = last_done = 0
@@ -411,7 +483,7 @@ def search(query, limit=25):
 def _get(url, timeout=12, limit=2_000_000):
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 kernel/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _open(req, timeout=timeout) as r:
             return r.read(limit), r.headers.get("Content-Type", "")
     except Exception:
         return None, ""

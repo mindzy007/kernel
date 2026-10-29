@@ -1,5 +1,6 @@
 """kernel - Windows 11 debloat & optimize tool. Build with build.bat."""
 import ctypes
+import html
 import json
 import math
 import os
@@ -14,12 +15,12 @@ from PySide6.QtCore import (
     QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient, QPainter,
-    QPainterPath, QPen, QPixmap,
+    QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient,
+    QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
-    QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
+    QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
     QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
 )
 from shiboken6 import isValid
@@ -28,7 +29,7 @@ import apps
 import specs
 import storage
 from jobs import ACTIVE, Job, JobManager
-from tweaks import TASKS, ONE_SHOT, is_active, revert_tweak
+from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
 BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
 
@@ -99,6 +100,7 @@ class Config:
         self.dir = os.path.join(base, "kernel")
         self.path = os.path.join(self.dir, "settings.json")
         self.toggles = {}
+        self.applied = {}
         self.smooth_scroll = True
         self.win_size = None
         self.download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "kernel")
@@ -112,6 +114,12 @@ class Config:
             return False
         if isinstance(d.get("toggles"), dict):
             self.toggles = {k: bool(v) for k, v in d["toggles"].items()}
+        else:
+            self.toggles = {}
+        if isinstance(d.get("applied"), dict):
+            self.applied = {k: bool(v) for k, v in d["applied"].items()}
+        else:
+            self.applied = {}
         if isinstance(d.get("download_dir"), str) and d["download_dir"]:
             self.download_dir = d["download_dir"]
         if isinstance(d.get("smooth_scroll"), bool):
@@ -126,7 +134,8 @@ class Config:
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({"toggles": self.toggles, "download_dir": self.download_dir,
+                json.dump({"toggles": self.toggles, "applied": self.applied,
+                           "download_dir": self.download_dir,
                            "smooth_scroll": self.smooth_scroll, "window": self.win_size}, f, indent=2)
             return True
         except OSError:
@@ -146,9 +155,14 @@ class AnimButton(QPushButton):
         super().__init__(text)
         self._hover = 0.0
         self._press = 0.0
+        self._cursor_pos = QPointF()
         self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
         self.a_hover = QPropertyAnimation(self, b"hover", self)
         self.a_press = QPropertyAnimation(self, b"press", self)
+        self.a_cursor = QPropertyAnimation(self, b"cursorPosition", self)
+        self.a_cursor.setDuration(100)
+        self.a_cursor.setEasingCurve(QEasingCurve.OutCubic)
         self.pressed.connect(lambda: self.go(self.a_press, 1.0, 120, QEasingCurve.OutCubic))
         self.released.connect(lambda: self.go(self.a_press, 0.0, 280, QEasingCurve.OutCubic))
 
@@ -174,16 +188,33 @@ class AnimButton(QPushButton):
         self._press = v
         self.update()
 
+    def get_cursor_position(self):
+        return self._cursor_pos
+
+    def set_cursor_position(self, pos):
+        self._cursor_pos = pos
+        self.update()
+
     hover = Property(float, get_hover, set_hover)
     press = Property(float, get_press, set_press)
+    cursorPosition = Property(QPointF, get_cursor_position, set_cursor_position)
 
     def enterEvent(self, e):
+        self.snap_cursor(e.position())
         self.go(self.a_hover, 1.0, 140)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         self.go(self.a_hover, 0.0, 200)
         super().leaveEvent(e)
+
+    def mouseMoveEvent(self, e):
+        self.go(self.a_cursor, QPointF(e.position()), 55, QEasingCurve.OutQuad)
+        super().mouseMoveEvent(e)
+
+    def snap_cursor(self, pos):
+        self.a_cursor.stop()
+        self.set_cursor_position(QPointF(pos))
 
     def squish(self, p, strength=0.035):
         c = QRectF(self.rect()).center()
@@ -278,12 +309,22 @@ class Button(AnimButton):
         f.setWeight(self.k["weight"])
         self.setFont(f)
         self.setIconSize(QSize(18, 18))
-        if kind == "accent":
-            glow = QGraphicsDropShadowEffect(self)
-            glow.setBlurRadius(34)
-            glow.setOffset(0, 0)
-            glow.setColor(QColor(110, 50, 250, 150))
-            self.setGraphicsEffect(glow)
+        self._enable = 1.0 if self.isEnabled() else 0.0
+        self.a_enable = QPropertyAnimation(self, b"enableMix", self)
+
+    def get_enable(self):
+        return self._enable
+
+    def set_enable(self, v):
+        self._enable = v
+        self.update()
+
+    enableMix = Property(float, get_enable, set_enable)
+
+    def changeEvent(self, e):
+        if e.type() == QEvent.EnabledChange:
+            self.go(self.a_enable, 1.0 if self.isEnabled() else 0.0, 380, QEasingCurve.InOutSine)
+        super().changeEvent(e)
 
     def sizeHint(self):
         fm = QFontMetrics(self.font())
@@ -302,24 +343,36 @@ class Button(AnimButton):
 
     def paintAccent(self, p, on):
         dark = 1.0 - 0.08 * self._press
-        c = lambda *v: QColor(*(int(x * dark) for x in v))
+        t = self._enable
+        mix = lambda a, b: tuple(lerp(x, y, t) for x, y in zip(a, b))
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         p.save()
         self.squish(p)
         path = QPainterPath()
         path.addRoundedRect(r, r.height() / 2, r.height() / 2)
+        top = mix((37, 37, 41), (78, 61, 110))
+        bottom = mix((29, 29, 33), (61, 48, 89))
         g = QLinearGradient(r.topLeft(), r.bottomLeft())
-        g.setColorAt(0.0, c(112, 52, 250) if on else QColor(40, 40, 40))
-        g.setColorAt(1.0, c(88, 30, 236) if on else QColor(30, 30, 30))
+        g.setColorAt(0.0, QColor(*(int(c * dark) for c in top)))
+        g.setColorAt(1.0, QColor(*(int(c * dark) for c in bottom)))
         p.fillPath(path, QBrush(g))
+        strength = self._hover * t
+        if strength > 0.001:
+            p.setClipPath(path)
+            glow = QRadialGradient(self._cursor_pos, self.width() * 0.9)
+            glow.setColorAt(0.0, QColor(214, 172, 255, int(105 * strength)))
+            glow.setColorAt(0.4, QColor(170, 120, 240, int(46 * strength)))
+            glow.setColorAt(1.0, QColor(140, 92, 220, 0))
+            p.fillRect(self.rect(), QBrush(glow))
+            p.setClipping(False)
         edge = QLinearGradient(r.topLeft(), r.bottomLeft())
-        edge.setColorAt(0.0, QColor(255, 255, 255, 90 if on else 20))
-        edge.setColorAt(1.0, QColor(255, 255, 255, 28 if on else 10))
+        edge.setColorAt(0.0, QColor(255, 255, 255, int(lerp(18, 34 + 20 * self._hover, t))))
+        edge.setColorAt(1.0, QColor(255, 255, 255, int(lerp(10, 16 + 12 * self._hover, t))))
         p.setPen(QPen(QBrush(edge), 1.2))
         p.drawPath(path)
         p.restore()
         p.setFont(self.font())
-        p.setPen(QColor(255, 255, 255) if on else QColor(110, 110, 110))
+        p.setPen(QColor(*(int(c) for c in mix((128, 128, 134), (255, 255, 255)))))
         p.drawText(QRectF(self.rect()), Qt.AlignCenter, self.text().strip())
 
     def paintEvent(self, _):
@@ -564,6 +617,10 @@ class Toggle(QWidget):
         self._pos = 1.0 if on else 0.0
         self.update()
 
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.isEnabled():
+            self.set(not self.on)
+
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
@@ -632,11 +689,11 @@ class HoverFrame(QFrame):
 
 
 class Row(HoverFrame):
-    def __init__(self, title, subtitle="", icon=None):
+    def __init__(self, title, subtitle="", icon=None, right_margin=16):
         super().__init__()
         self.setObjectName("row")
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(16, 12 if icon else 16, 16, 12 if icon else 16)
+        lay.setContentsMargins(16, 12 if icon else 16, right_margin, 12 if icon else 16)
         lay.setSpacing(14)
         if icon:
             lay.addWidget(icon)
@@ -651,6 +708,7 @@ class Row(HoverFrame):
             self.sub.hide()
         text.addWidget(t)
         text.addWidget(self.sub)
+        self.text_col = text
         lay.addLayout(text, 1)
         self.right = QHBoxLayout()
         self.right.setSpacing(8)
@@ -658,54 +716,54 @@ class Row(HoverFrame):
 
 
 class TaskRow(Row):
-    def __init__(self, title, subtitle, on_apply=None, on_revert=None):
-        super().__init__(title, subtitle)
-        self.setCursor(Qt.PointingHandCursor)
+    def __init__(self, title, subtitle, on_apply=None, on_revert=None, reversible=True):
+        super().__init__(title, subtitle, right_margin=0)
+        self.reversible = reversible
+        self.sub.setWordWrap(True)
+        self.setCursor(Qt.ArrowCursor)
         self.apply = None
         self.revert = None
         if on_apply:
             self.apply = Button("Apply")
             self.apply.setCursor(Qt.PointingHandCursor)
-            self.apply.setMinimumWidth(96)
+            self.apply.setMinimumWidth(88)
             self.apply.clicked.connect(on_apply)
             self.right.addWidget(self.apply)
         if on_revert:
             self.revert = Button("Revert")
             self.revert.setCursor(Qt.PointingHandCursor)
-            self.revert.setMinimumWidth(96)
+            self.revert.setMinimumWidth(88)
             self.revert.clicked.connect(on_revert)
             self.right.addWidget(self.revert)
         self.toggle = Toggle()
         self.right.addWidget(self.toggle)
 
-    def set_active(self, active):
+    def set_active(self, active, selected=None):
         if self.apply is None:
             return
         self.apply.setText("Applied" if active else "Apply")
         self.apply.setEnabled(not active)
-        self.revert.setEnabled(active)
-        self.toggle.setEnabled(not active)
+        self.revert.setEnabled(active and self.reversible)
         if active:
-            self.toggle.set_quiet(False)
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton and self.toggle.isEnabled():
-            self.toggle.set(not self.toggle.on)
+            self.toggle.set_quiet(True)
+        elif selected is not None:
+            self.toggle.set_quiet(selected)
+        self.toggle.setEnabled(not active)
 
 
 class RunRow(Row):
     """Single-use action: one click runs it."""
 
     def __init__(self, title, subtitle, on_run, on_revert, active=False):
-        super().__init__(title, subtitle)
+        super().__init__(title, subtitle, right_margin=0)
         self.b = Button("Run")
         self.b.setCursor(Qt.PointingHandCursor)
-        self.b.setMinimumWidth(116)
+        self.b.setMinimumWidth(88)
         self.b.clicked.connect(on_run)
         self.right.addWidget(self.b)
         self.revert = Button("Revert")
         self.revert.setCursor(Qt.PointingHandCursor)
-        self.revert.setMinimumWidth(116)
+        self.revert.setMinimumWidth(88)
         self.revert.clicked.connect(on_revert)
         self.right.addWidget(self.revert)
         self.set_active(active)
@@ -723,6 +781,7 @@ class ActionRow(Row):
         super().__init__(title, subtitle, kernel.make_icon(key, domain, title))
         self.actions, self.kernel, self.key, self.domain = actions, kernel, key, domain
         self.jobs = [None] * len(actions)
+        self.source = None
         self.buttons = []
         for i, a in enumerate(actions):
             b = Button(a[0])
@@ -732,9 +791,19 @@ class ActionRow(Row):
             self.right.addWidget(b)
             self.buttons.append(b)
 
-    def set_info(self, version, size):
+    def set_info(self, version, size, url=""):
         self.sub.setText(f"v{version.lstrip('vV')}" + (f"  ·  {apps.human(size)}" if size else ""))
         self.sub.show()
+        if url:
+            if self.source is None:
+                self.source = QLabel()
+                self.source.setObjectName("muted")
+                self.source.setTextFormat(Qt.RichText)
+                self.source.setOpenExternalLinks(True)
+                self.source.setTextInteractionFlags(Qt.TextBrowserInteraction)
+                self.text_col.addWidget(self.source)
+            shown = html.escape(url if len(url) <= 90 else url[:87] + "...")
+            self.source.setText(f'Direct Source: <a href="{html.escape(url, quote=True)}" style="color:#b48cf0;text-decoration:none;">{shown}</a>')
 
     def click(self, i):
         job = self.jobs[i]
@@ -827,7 +896,7 @@ class Page(QScrollArea):
         outer = QHBoxLayout(content)
         outer.setContentsMargins(20, 0, 20, 0)
         col = QWidget()
-        col.setMaximumWidth(760)
+        col.setMaximumWidth(1060)
         outer.addWidget(col, 1)
         outer.addStretch(0)
         self.col = QVBoxLayout(col)
@@ -1057,7 +1126,6 @@ class Kernel(QWidget):
         self.cfg = Config()
         SmoothScroller.on = self.cfg.smooth_scroll
         self.jobs = JobManager(os.path.join(self.cfg.dir, "downloads.json"))
-        self.loading = True
         self.icons, self.icon_widgets, self.icon_pending = {}, {}, set()
         self.icon_q = queue.Queue()
         self.icon_done = queue.Queue()
@@ -1148,12 +1216,19 @@ class Kernel(QWidget):
         self.jobs.logged.connect(self.log.appendPlainText)
         self.jobs.added.connect(self.add_job_row)
 
-        for r, key, _, _ in self.rows:
-            r.toggle.set_quiet(self.cfg.toggles.get(key, False))
+        self.applied_states = {}
+        self.profile_pending = False
+        for r, key, _, fn in self.rows:
+            actual = is_active(fn)
+            active = self.cfg.applied.get(key, actual)
+            if key in IRREVERSIBLE and actual:
+                active = True
+            self.applied_states[key] = active
+            r.set_active(active, self.cfg.toggles.get(key, False))
             r.toggle.toggled.connect(self.on_toggle)
+            self.profile_pending |= active != actual
         for job in self.jobs.load():
             self.add_job_row(job)
-        self.loading = False
         self.update_status()
         self.update_pill()
         if not is_admin():
@@ -1410,21 +1485,21 @@ class Kernel(QWidget):
             self.on_icon(key, img)
         while True:
             try:
-                key, version, size = self.info_done.get_nowait()
+                key, version, size, url = self.info_done.get_nowait()
             except queue.Empty:
                 return
             row = self.info_rows.get(key)
             if row is not None and isValid(row) and version:
-                row.set_info(version, size)
+                row.set_info(version, size, url)
 
     def info_loop(self):
         while True:
             key = self.info_q.get()
             try:
-                version, size = apps.info(key)
+                version, size, url = apps.info(key)
             except Exception:
                 continue
-            self.info_done.put((key, version, size))
+            self.info_done.put((key, version, size, url))
 
     def on_icon(self, key, img):
         self.icons[key] = img
@@ -1456,7 +1531,8 @@ class Kernel(QWidget):
                 r = TaskRow(
                     name, desc,
                     lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
-                    lambda _=False, n=name, f=fn: self.run_reverts([(n, f)]))
+                    lambda _=False, n=name, f=fn: self.run_reverts([(n, f)]),
+                    reversible=fn.__name__ not in IRREVERSIBLE)
                 r.set_active(is_active(fn))
                 self.rows.append((r, fn.__name__, name, fn))
                 page.add(r)
@@ -1585,7 +1661,7 @@ class Kernel(QWidget):
     def app_actions(self, pkg_id):
         def dl(job):
             return apps.download(pkg_id, self.cfg.download_dir, job)
-        return [("Download", "Downloaded", "download", dl),
+        return [("Download", "Download", "download", dl),
                 ("Install", "Installed", "install", lambda job: apps.install(pkg_id, job))]
 
     def build_apps(self):
@@ -1706,7 +1782,7 @@ class Kernel(QWidget):
             self.dl_row.right.addWidget(b)
         page.add(self.dl_row)
         page.section("Profile")
-        prof = Row("Settings file", "Selected toggles and download location are saved automatically")
+        prof = Row("Settings file", "Applied tweak states and download location are saved automatically")
         for text, fn in (("Export", self.export_settings), ("Import", self.import_settings)):
             b = Button(text)
             b.clicked.connect(fn)
@@ -1756,6 +1832,7 @@ class Kernel(QWidget):
     def export_settings(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export settings", "kernel-settings.json", "JSON (*.json)")
         if path:
+            self.save_toggle_states()
             ok = self.cfg.save(path)
             self.logged.emit(f"Settings exported to {path}" if ok else "Export failed.")
 
@@ -1766,32 +1843,48 @@ class Kernel(QWidget):
         if not self.cfg.load(path):
             self.logged.emit("Import failed: not a valid settings file.")
             return
-        self.loading = True
-        for r, key, _, _ in self.rows:
-            r.toggle.set_quiet(self.cfg.toggles.get(key, False))
-        self.loading = False
+        self.applied_states = {}
+        self.profile_pending = False
+        for r, key, _, fn in self.rows:
+            actual = is_active(fn)
+            active = self.cfg.applied.get(key, actual)
+            if key in IRREVERSIBLE and actual:
+                active = True
+            self.applied_states[key] = active
+            r.set_active(active, self.cfg.toggles.get(key, False))
+            self.profile_pending |= active != actual
+        for row, fn in self.action_rows:
+            row.set_active(is_active(fn))
         self.dl_row.sub.setText(self.cfg.download_dir)
         self.smooth_toggle.set_quiet(self.cfg.smooth_scroll)
         SmoothScroller.on = self.cfg.smooth_scroll
         self.update_status()
+        self.save_toggle_states()
         self.cfg.save()
         self.logged.emit(f"Settings imported from {path}")
 
-    def on_toggle(self, *_):
-        if self.loading:
-            return
-        self.update_status()
+    def save_toggle_states(self):
         self.cfg.toggles = {key: r.toggle.on for r, key, _, _ in self.rows}
+        self.cfg.applied = dict(self.applied_states)
+
+    def update_status(self):
+        n = sum(r.toggle.on and r.apply.isEnabled() for r, *_ in self.rows)
+        if self.profile_pending:
+            self.status.setText(f"{n} selected; imported profile ready to apply" if n
+                                else "Imported profile ready to apply")
+        else:
+            self.status.setText(f"{n} selected" if n else "Nothing selected")
+        self.btn.setEnabled(bool(n or self.profile_pending))
+
+    def on_toggle(self, *_):
+        self.update_status()
+        self.save_toggle_states()
         if not (self.isMaximized() or self.isFullScreen()):
             self.cfg.win_size = [self.width(), self.height()]
         self.cfg.save()
 
-    def update_status(self):
-        n = sum(r.toggle.on for r, *_ in self.rows)
-        self.status.setText(f"{n} selected" if n else "Nothing selected")
-
     def closeEvent(self, e):
-        self.cfg.toggles = {key: r.toggle.on for r, key, _, _ in self.rows}
+        self.save_toggle_states()
         if not (self.isMaximized() or self.isFullScreen()):
             self.cfg.win_size = [self.width(), self.height()]
         self.cfg.save()
@@ -1809,30 +1902,65 @@ class Kernel(QWidget):
 
     # ---- tweaks ----
 
+    def irreversible_names(self, operations):
+        return [name for name, fn, target in operations if target and fn.__name__ in IRREVERSIBLE]
+
     def start(self):
-        sel = [(name, fn) for r, _, name, fn in self.rows if r.toggle.on]
-        self.run_tasks(sel)
+        targets = dict(self.applied_states) if self.profile_pending else {}
+        for row, key, _, _ in self.rows:
+            if row.toggle.on and row.apply.isEnabled():
+                targets[key] = True
+        operations = []
+        for row, key, name, fn in self.rows:
+            target = targets.get(key)
+            if target is None or is_active(fn) == target:
+                continue
+            if not target and key in IRREVERSIBLE:
+                continue
+            operations.append((name, fn, target))
+        if not operations:
+            self.profile_pending = False
+            self.update_status()
+            return
+        text = ("This will apply the selected tweaks and sync imported applied states. "
+                "Some changes affect Windows system and security settings. Continue?")
+        risky = self.irreversible_names(operations)
+        if risky:
+            text = ("These changes CANNOT be undone: " + ", ".join(risky) + ".\n\n" + text)
+        answer = QMessageBox.question(
+            self, "Apply selected changes", text,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            self.run_operations(operations)
 
     def run_tasks(self, sel):
-        self.run_operations(sel, False)
+        operations = [(name, fn, True) for name, fn in sel]
+        risky = self.irreversible_names(operations)
+        if risky and QMessageBox.warning(
+                self, "This cannot be undone",
+                f"{', '.join(risky)} cannot be reverted once applied. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.run_operations(operations)
 
     def run_reverts(self, sel):
-        self.run_operations(sel, True)
+        self.run_operations([(name, fn, False) for name, fn in sel])
 
-    def run_operations(self, sel, reverting):
-        if not sel or (self.tweak_job and self.tweak_job.active):
+    def run_operations(self, operations):
+        if not operations or (self.tweak_job and self.tweak_job.active):
             return
+        self.tweak_operation_fns = {fn for _, fn, _ in operations}
         self.btn.setEnabled(False)
         self.goto(ACTIVITY)
 
         def work(job):
-            for name, fn in sel:
-                job.log(f"== {'Revert ' if reverting else ''}{name}")
+            for name, fn, target in operations:
+                job.log(f"== {'Apply ' if target else 'Revert '}{name}")
                 try:
-                    if reverting:
+                    if is_active(fn) == target:
+                        job.log(f"Skipped {name}: already {'active' if target else 'inactive'}.")
+                    elif not target:
                         revert_tweak(fn, job.log)
-                    elif is_active(fn):
-                        job.log(f"Skipped {name}: already active.")
                     else:
                         fn(job.log)
                 except Exception as e:
@@ -1849,11 +1977,21 @@ class Kernel(QWidget):
 
     def tweaks_changed(self):
         if self.tweak_job and not self.tweak_job.active:
-            self.btn.setEnabled(True)
-            for row, _, _, fn in self.rows:
-                row.set_active(is_active(fn))
+            for row, key, _, fn in self.rows:
+                active = is_active(fn)
+                previous = self.applied_states.get(key, False)
+                if fn in self.tweak_operation_fns and active != previous:
+                    self.applied_states[key] = active
+                selected = False if previous and not self.applied_states[key] else None
+                row.set_active(self.applied_states[key], selected)
+            self.profile_pending = any(
+                self.applied_states[key] != is_active(fn)
+                for _, key, _, fn in self.rows)
             for row, fn in self.action_rows:
                 row.set_active(is_active(fn))
+            self.update_status()
+            self.save_toggle_states()
+            self.cfg.save()
 
 
 if __name__ == "__main__":

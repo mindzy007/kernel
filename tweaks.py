@@ -26,17 +26,136 @@ def t_bing(log):
     log("Bing web results disabled in Start search (sign out/in or restart Explorer to apply).")
 
 
-def t_group_policy(log):
+def _gpedit_packages():
     pkgs = []
     for pat in ("ClientExtensions", "ClientTools"):
         pkgs += glob.glob(os.path.expandvars(
             rf"%SystemRoot%\servicing\Packages\Microsoft-Windows-GroupPolicy-{pat}-Package~3*.mum"))
+    return pkgs
+
+
+def t_group_policy(log):
+    if _active_group_policy():
+        log("Group Policy Editor is already available.")
+        return
+    pkgs = _gpedit_packages()
     if not pkgs:
-        log("No Group Policy packages found (already Pro/Enterprise?).")
+        log("No Group Policy packages found on this system.")
         return
     for p in pkgs:
         log(f"Installing {os.path.basename(p)}")
         log(run(["dism", "/online", "/norestart", f"/add-package:{p}"])[-300:])
+
+
+def t_dark_mode(log):
+    key = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+    set_reg(HKCU, key, "AppsUseLightTheme", 0)
+    set_reg(HKCU, key, "SystemUsesLightTheme", 0)
+    broadcast_setting("ImmersiveColorSet")
+    run(["taskkill", "/f", "/im", "explorer.exe"])
+    subprocess.Popen(["explorer.exe"], creationflags=NOWIN)
+    log("Dark mode forced through the registry; Explorer restarted.")
+
+
+def _xbox_values(enabled):
+    d = 1 if enabled else 0
+    set_reg(HKCU, r"Software\Microsoft\GameBar", "UseNexusForGameBarEnabled", d)
+    set_reg(HKCU, r"Software\Microsoft\GameBar", "ShowStartupPanel", d)
+    set_reg(HKCU, r"System\GameConfigStore", "GameDVR_Enabled", d)
+    dvr = r"Software\Microsoft\Windows\CurrentVersion\GameDVR"
+    set_reg(HKCU, dvr, "AppCaptureEnabled", d)
+    set_reg(HKCU, dvr, "AudioCaptureEnabled", d)
+    set_reg(HKCU, dvr, "CursorCaptureEnabled", d)
+    if enabled:
+        _delete_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\GameDVR", "AllowGameDVR")
+    else:
+        set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\GameDVR", "AllowGameDVR", 0)
+
+
+def t_xbox(log):
+    _xbox_values(False)
+    log("Xbox Game Bar overlay, controller hints and captures disabled.")
+
+
+ONEDRIVE_DIRS = (r"%LOCALAPPDATA%\Microsoft\OneDrive", r"%ProgramData%\Microsoft OneDrive",
+                 r"%ProgramFiles%\Microsoft OneDrive", r"%ProgramFiles(x86)%\Microsoft OneDrive",
+                 r"%SystemDrive%\OneDriveTemp")
+
+
+def t_onedrive(log):
+    run(["taskkill", "/f", "/im", "OneDrive.exe"])
+    for sub in ("SysWOW64", "System32"):
+        setup = os.path.expandvars(rf"%SystemRoot%\{sub}\OneDriveSetup.exe")
+        if os.path.isfile(setup):
+            log(f"Uninstalling OneDrive with {sub}\\OneDriveSetup.exe...")
+            run([setup, "/uninstall"])
+    local = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\OneDrive")
+    setup = os.path.join(local, "OneDriveSetup.exe")
+    for path in glob.glob(os.path.join(local, "*", "OneDriveSetup.exe")) + [setup]:
+        if os.path.isfile(path):
+            run([path, "/uninstall"])
+    for d in ONEDRIVE_DIRS:
+        shutil.rmtree(os.path.expandvars(d), ignore_errors=True)
+    home = os.path.expandvars(r"%USERPROFILE%\OneDrive")
+    try:
+        os.rmdir(home)  # only succeeds when empty, so user files are never deleted
+    except OSError:
+        if os.path.isdir(home):
+            log("Kept your OneDrive folder because it still contains files.")
+    _delete_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "OneDrive")
+    set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\OneDrive", "DisableFileSyncNGSC", 1)
+    for clsid in ("{018D5C66-4533-4307-9B53-224DE2ED1FE6}", "{04271989-C4D2-4E5C-8E3F-9B7D7BBE1D5B}"):
+        for path in (rf"Software\Classes\CLSID\{clsid}", rf"Software\Classes\WOW6432Node\CLSID\{clsid}"):
+            try:
+                with winreg.OpenKey(HKCU, path, 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.SetValueEx(k, "System.IsPinnedToNameSpaceTree", 0, winreg.REG_DWORD, 0)
+            except OSError:
+                pass
+    log("OneDrive removed. This cannot be undone.")
+
+
+# (display name, package name)
+BLOAT_APPS = [
+    ("Sticky Notes", "Microsoft.MicrosoftStickyNotes"),
+    ("Sound Recorder", "Microsoft.WindowsSoundRecorder"),
+    ("Weather", "Microsoft.BingWeather"),
+    ("News", "Microsoft.BingNews"),
+    ("Microsoft Family", "MicrosoftCorporationII.MicrosoftFamily"),
+    ("Clock", "Microsoft.WindowsAlarms"),
+    ("Clipchamp", "Clipchamp.Clipchamp"),
+    ("Feedback Hub", "Microsoft.WindowsFeedbackHub"),
+    ("Get Help", "Microsoft.GetHelp"),
+    ("Tips", "Microsoft.Getstarted"),
+    ("Solitaire Collection", "Microsoft.MicrosoftSolitaireCollection"),
+    ("Movies & TV", "Microsoft.ZuneVideo"),
+    ("Maps", "Microsoft.WindowsMaps"),
+    ("Power Automate", "Microsoft.PowerAutomateDesktop"),
+    ("Cortana", "Microsoft.549981C3F5F10"),
+]
+BLOAT_NAMES = ", ".join(n for n, _ in BLOAT_APPS)
+APPX_STORE = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications"
+
+
+def _installed_appx():
+    names = []
+    try:
+        with winreg.OpenKey(HKLM, APPX_STORE) as k:
+            for i in range(winreg.QueryInfoKey(k)[0]):
+                names.append(winreg.EnumKey(k, i).lower())
+    except OSError:
+        pass
+    return names
+
+
+def t_remove_apps(log):
+    for display, pkg in BLOAT_APPS:
+        log(f"Removing {display}...")
+        script = (f"Get-AppxPackage -AllUsers -Name '{pkg}' | Remove-AppxPackage -AllUsers "
+                  f"-ErrorAction SilentlyContinue; "
+                  f"Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq '{pkg}' | "
+                  f"Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue")
+        run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
+    log("Selected apps removed. This cannot be undone.")
 
 
 def _clean_dir(path, log):
@@ -269,8 +388,27 @@ def _active_power():
 
 
 def _active_group_policy():
-    return not glob.glob(os.path.expandvars(
-        r"%SystemRoot%\servicing\Packages\Microsoft-Windows-GroupPolicy-*.mum"))
+    return os.path.isfile(os.path.expandvars(r"%SystemRoot%\System32\gpedit.msc"))
+
+
+def _active_onedrive():
+    exes = [os.path.expandvars(p) for p in (
+        r"%LOCALAPPDATA%\Microsoft\OneDrive\OneDrive.exe",
+        r"%ProgramFiles%\Microsoft OneDrive\OneDrive.exe",
+        r"%ProgramFiles(x86)%\Microsoft OneDrive\OneDrive.exe")]
+    return not any(os.path.isfile(p) for p in exes)
+
+
+def _active_remove_apps():
+    installed = _installed_appx()
+    return not any(n.startswith(pkg.lower() + "_") for _, pkg in BLOAT_APPS for n in installed)
+
+
+def _active_xbox():
+    return (_reg(HKCU, r"Software\Microsoft\GameBar", "UseNexusForGameBarEnabled") == 0
+            and _reg(HKCU, r"System\GameConfigStore", "GameDVR_Enabled") == 0
+            and _reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\GameDVR",
+                     "AppCaptureEnabled") == 0)
 
 
 def _active_widgets():
@@ -290,6 +428,12 @@ ACTIVE_CHECKS = {
     "t_telemetry": lambda: _reg(
         HKLM, r"SOFTWARE\Policies\Microsoft\Windows\DataCollection", "AllowTelemetry") == 0,
     "t_group_policy": _active_group_policy,
+    "t_onedrive": _active_onedrive,
+    "t_remove_apps": _active_remove_apps,
+    "t_xbox": _active_xbox,
+    "t_dark_mode": lambda: _all_reg(
+        HKCU, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ("AppsUseLightTheme", "SystemUsesLightTheme"), 0),
     "t_power": _active_power,
     "t_widgets": _active_widgets,
     "t_time_format": lambda: _reg(HKCU, r"Control Panel\International", "sShortDate") == "MMM d, yyyy",
@@ -419,7 +563,22 @@ def revert_tweak(fn, log):
             raise RuntimeError(out[-300:])
     elif name == "t_nvidia_profile":
         _revert_nvidia_profile(log)
-    elif name in {"t_temp", "t_group_policy"}:
+    elif name == "t_group_policy":
+        for p in glob.glob(os.path.expandvars(
+                r"%SystemRoot%\servicing\Packages\Microsoft-Windows-GroupPolicy-Client*-Package~3*.mum")):
+            out = run(["dism", "/online", "/norestart", f"/remove-package:{os.path.basename(p)[:-4]}"])
+            if out and "error" in out.lower():
+                raise RuntimeError(out[-300:])
+    elif name == "t_dark_mode":
+        key = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        set_reg(HKCU, key, "AppsUseLightTheme", 1)
+        set_reg(HKCU, key, "SystemUsesLightTheme", 1)
+        broadcast_setting("ImmersiveColorSet")
+        run(["taskkill", "/f", "/im", "explorer.exe"])
+        subprocess.Popen(["explorer.exe"], creationflags=NOWIN)
+    elif name == "t_xbox":
+        _xbox_values(True)
+    elif name in IRREVERSIBLE or name == "t_temp":
         raise RuntimeError("This action does not have a safe automatic Windows default to restore.")
     else:
         raise RuntimeError(f"No revert handler is defined for {name}.")
@@ -738,15 +897,18 @@ def _revert_nvidia_profile(log):
 
 
 # Run-once actions shown as buttons instead of toggles
-ONE_SHOT = {"t_temp", "t_group_policy"}
+ONE_SHOT = {"t_temp"}
+
+# Tweaks with no way back; the UI warns before applying and disables Revert
+IRREVERSIBLE = {"t_onedrive", "t_remove_apps"}
 
 # (section, title, description, function)
 TASKS = [
-    ("Privacy", "Remove Bing from search", "Stop web results in Start menu search", t_bing),
+    ("Privacy", "Remove Bing from search", "Removes Bing results when searching for items on your PC via start menu and search", t_bing),
     ("Privacy", "Disable ads & suggestions", "Tips, suggested apps and advertising ID", t_ads),
     ("Privacy", "Minimize telemetry", "Reduce diagnostic data collection", t_telemetry),
     ("Storage", "Clean temp files", "Temp, Prefetch and Recycle Bin", t_temp),
-    ("System", "Group Policy Editor", "Install gpedit on Windows Home", t_group_policy),
+    ("System", "Enable Group Policy Editor", "Installs pro version of gpeditor on to your system", t_group_policy),
     ("Performance", "Ultimate performance", "Activate the maximum performance power plan", t_power),
     ("Appearance", "Hide Widgets & Chat", "Remove the taskbar buttons", t_widgets),
     ("Appearance", "Taskbar date format", "Show the date as MMM d, yyyy (e.g. Dec 31, 2030)", t_time_format),
@@ -763,5 +925,9 @@ TASKS = [
     ("Security", "Disable Smart App Control", "Stops blocking unsigned or unknown apps (permanent until Windows reset)", t_smart_app_control),
     ("Security", "Disable Core isolation", "Turn off Memory integrity (HVCI) for better performance", t_core_isolation),
     ("Privacy", "Disable Nearby sharing", "Stops sharing with nearby PCs", t_nearby),
-    ("Privacy", "Disable Recall", "Policy plus DISM /Disable-Feature Recall", t_recall),
+    ("Privacy", "Disable Recall", "Disables Windows 11 AI-powered feature that acts like a photographic memory for your computer", t_recall),
+    ("Apps", "Remove OneDrive", "Completely uninstalls OneDrive, deletes its leftovers and blocks it from coming back. WARNING: this cannot be reverted.", t_onedrive),
+    ("Apps", "Remove useless Windows apps", f"Uninstalls: {BLOAT_NAMES}. WARNING: this cannot be reverted.", t_remove_apps),
+    ("Appearance", "Force dark mode", "Turns on dark mode through the registry, even on Windows that isn't activated", t_dark_mode),
+    ("Performance", "Disable Xbox Game Bar", "Disables Xbox Game Bar Overlay, Xbox accessibility control hints and Xbox capture", t_xbox),
 ]
