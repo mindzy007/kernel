@@ -68,34 +68,40 @@ class NVIDIAControl:
             query, 0x7082A053, ctypes.c_int, ctypes.c_uint32,
             ctypes.POINTER(GAMMA_CORRECTION_EX), optional=True)
 
-        try:
-            primary = _primary_device_name()
-        except OSError as ex:
-            raise NVIDIAUnavailable("Windows could not identify the primary display.") from ex
-        if not primary:
-            raise NVIDIAUnavailable("Windows did not report a primary display.")
-        self.display_name = primary
-        self.display_handle = None
+        self._displays = {}
         for index in range(32):
             handle = ctypes.c_void_p()
-            status = self._enum_display(index, ctypes.byref(handle))
-            if status != 0:
+            if self._enum_display(index, ctypes.byref(handle)) != 0:
                 break
             name = ctypes.create_string_buffer(64)
-            status = self._get_display_name(handle, name)
-            if status == 0 and name.value.decode("ascii", errors="replace").casefold() == primary.casefold():
-                self.display_handle = handle
-                break
-        if self.display_handle is None:
-            raise NVIDIAUnavailable(
-                "The primary display is not connected to an active NVIDIA display output.")
+            if self._get_display_name(handle, name) != 0:
+                continue
+            display_id = ctypes.c_uint32()
+            if self._get_display_id(name.value, ctypes.byref(display_id)) != 0:
+                continue
+            text = name.value.decode("ascii", errors="replace")
+            self._displays[text.casefold()] = (text, handle, display_id)
+        if not self._displays:
+            raise NVIDIAUnavailable("No display is connected to an active NVIDIA display output.")
 
-        self.display_id = ctypes.c_uint32()
-        status = self._get_display_id(
-            primary.encode("ascii"), ctypes.byref(self.display_id))
-        if status != 0:
-            raise NVIDIAUnavailable(
-                f"NVIDIA could not identify the primary display (status {status}).")
+        try:
+            primary = _primary_device_name()
+        except OSError:
+            primary = None
+        if not self.select(primary):
+            self.select(next(iter(self._displays.values()))[0])
+
+    @property
+    def display_names(self):
+        return [entry[0] for entry in self._displays.values()]
+
+    def select(self, name):
+        """Make `name` the display that gamma/contrast/vibrance calls act on. False if it is not on an NVIDIA output."""
+        entry = self._displays.get((name or "").casefold())
+        if entry is None:
+            return False
+        self.display_name, self.display_handle, self.display_id = entry
+        return True
 
     @property
     def supports_gamma_contrast(self):
@@ -225,7 +231,9 @@ class DISPLAY_DEVICEW(ctypes.Structure):
 
 
 ENUM_CURRENT_SETTINGS = 0xFFFFFFFF
+DISPLAY_DEVICE_ATTACHED_TO_DESKTOP = 0x1
 DISPLAY_DEVICE_PRIMARY_DEVICE = 0x4
+DISPLAY_DEVICE_MIRRORING_DRIVER = 0x8
 CDS_TEST = 0x2
 CDS_UPDATEREGISTRY = 0x1
 DM_DISPLAYFREQUENCY = 0x400000
@@ -251,6 +259,68 @@ def _primary_device_name():
     return None
 
 
+def _enum_display_devices(parent, flags=0):
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.EnumDisplayDevicesW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(DISPLAY_DEVICEW), wintypes.DWORD]
+    user32.EnumDisplayDevicesW.restype = wintypes.BOOL
+    index = 0
+    while True:
+        device = DISPLAY_DEVICEW()
+        device.cb = ctypes.sizeof(device)
+        if not user32.EnumDisplayDevicesW(parent, index, ctypes.byref(device), flags):
+            return
+        yield device
+        index += 1
+
+
+def _edid_model(edid):
+    """Monitor model name from the descriptor block (tag 0xFC) of an EDID."""
+    for offset in (54, 72, 90, 108):
+        block = bytes(edid[offset:offset + 18])
+        if len(block) == 18 and block[:4] == b"\x00\x00\x00\xfc":
+            return block[5:].split(b"\n")[0].decode("ascii", errors="ignore").strip() or None
+    return None
+
+
+def _monitor_model(adapter_name):
+    """Model name (e.g. 'LG ULTRAGEAR') of the monitor on a display adapter, read from its EDID."""
+    import winreg
+    for monitor in _enum_display_devices(adapter_name, 1):  # 1 = EDD_GET_DEVICE_INTERFACE_NAME
+        parts = monitor.device_id.split("#")  # \?\DISPLAY#<hardware id>#<instance>#{guid}
+        if len(parts) >= 3:
+            path = rf"SYSTEM\CurrentControlSet\Enum\DISPLAY\{parts[1]}\{parts[2]}\Device Parameters"
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as key:
+                    model = _edid_model(winreg.QueryValueEx(key, "EDID")[0])
+            except OSError:
+                model = None
+            if model:
+                return model
+        generic = monitor.device_string.strip()
+        if generic and "generic" not in generic.casefold():
+            return generic
+        break
+    return None
+
+
+def get_all_displays():
+    """[(Windows device name, readable label)] for every display attached to the desktop."""
+    found = []
+    for adapter in _enum_display_devices(None):
+        if not adapter.state_flags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP or adapter.state_flags & DISPLAY_DEVICE_MIRRORING_DRIVER:
+            continue
+        number = "".join(ch for ch in adapter.device_name if ch.isdigit()) or "?"
+        try:
+            model = _monitor_model(adapter.device_name)
+        except OSError:
+            model = None
+        found.append((adapter.device_name, model or f"Display {number}", number))
+    labels = [label for _, label, _ in found]
+    return [(name, f"{label} ({number})" if labels.count(label) > 1 else label)
+            for name, label, number in found]
+
+
 def _mode(device, index):
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.EnumDisplaySettingsW.argtypes = [
@@ -263,11 +333,13 @@ def _mode(device, index):
     return mode
 
 
-def refresh_info():
-    device = _primary_device_name()
+def refresh_info(device=None):
+    device = device or _primary_device_name()
+    if not device:
+        raise DisplayError("Windows did not report a display.")
     current = _mode(device, ENUM_CURRENT_SETTINGS)
     if current is None:
-        raise DisplayError("Windows could not read the primary display's current mode.")
+        raise DisplayError("Windows could not read the display's current mode.")
     modes = []
     index = 0
     while True:
@@ -292,10 +364,8 @@ def refresh_info():
     }
 
 
-def apply_highest_refresh(expected_device=None):
-    info = refresh_info()
-    if expected_device and info["device"].casefold() != expected_device.casefold():
-        raise DisplayError("The primary display is no longer connected to the active NVIDIA output.")
+def apply_highest_refresh(device=None):
+    info = refresh_info(device)
     if info["highest"] <= info["current"]:
         return info
     mode = info["mode"]
@@ -310,4 +380,4 @@ def apply_highest_refresh(expected_device=None):
     applied = change(info["device"], ctypes.byref(mode), None, CDS_UPDATEREGISTRY, None)
     if applied != DISP_CHANGE_SUCCESSFUL:
         raise DisplayError(f"Windows could not apply the highest refresh rate (display status {applied}).")
-    return refresh_info()
+    return refresh_info(info["device"])

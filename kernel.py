@@ -19,9 +19,11 @@ from PySide6.QtGui import (
     QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
 )
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsOpacityEffect,
+    QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsEffect,
+    QGraphicsOpacityEffect,
     QComboBox, QGridLayout, QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QStackedWidget, QSizePolicy, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QStackedWidget, QStyle, QStyledItemDelegate, QSizePolicy,
+    QVBoxLayout, QWidget,
 )
 from shiboken6 import isValid
 
@@ -62,16 +64,11 @@ QScrollBar::handle:vertical {{ background: #262626; border-radius: 3px; min-heig
 QScrollBar::handle:vertical:hover {{ background: #363636; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
-QComboBox {{ background: #0f0f0f; border: 1px solid #222222; border-radius: 11px; padding: 10px 40px 10px 18px;
+QComboBox {{ background: transparent; border: none; padding: 10px 4px 10px 18px;
             font-size: 15px; min-width: 120px; }}
-QComboBox:hover {{ background: #1a1a1a; }}
-QComboBox:on {{ border-color: #4a4a4a; }}
 QComboBox::drop-down {{ border: none; width: 34px; subcontrol-origin: padding; subcontrol-position: center right; }}
 QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
-QComboBox QAbstractItemView {{ background: #101010; border: 1px solid #2a2a2a; border-radius: 10px; padding: 4px;
-                              outline: none; selection-background-color: #242424; }}
-QComboBox QAbstractItemView::item {{ min-height: 34px; padding-left: 12px; border-radius: 8px; }}
-QComboBox QAbstractItemView::item:selected {{ background: #242424; }}
+QComboBox QAbstractItemView {{ background: transparent; border: none; padding: 6px; outline: none; }}
 """
 
 TWEAKS, APPS, GAMING, STORAGE, SPECS, ACTIVITY, SETTINGS = range(7)
@@ -120,12 +117,11 @@ class Config:
         base = os.environ.get("APPDATA") or os.path.expanduser("~")
         self.dir = os.path.join(base, "kernel")
         self.path = os.path.join(self.dir, "settings.json")
-        self.toggles = {}
         self.applied = {}
         self.smooth_scroll = True
         self.cpu_temp_mode = "average"
-        self.nvidia_gamma = 100
-        self.nvidia_contrast = 50
+        self.nvidia_displays = {}
+        self.legacy_display = None
         self.win_size = None
         self.download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "kernel")
         self.load(self.path)
@@ -136,10 +132,6 @@ class Config:
                 d = json.load(f)
         except (OSError, ValueError):
             return False
-        if isinstance(d.get("toggles"), dict):
-            self.toggles = {k: bool(v) for k, v in d["toggles"].items()}
-        else:
-            self.toggles = {}
         if isinstance(d.get("applied"), dict):
             self.applied = {k: bool(v) for k, v in d["applied"].items()}
         else:
@@ -150,10 +142,16 @@ class Config:
             self.smooth_scroll = d["smooth_scroll"]
         if d.get("cpu_temp_mode") in ("average", "per_core"):
             self.cpu_temp_mode = d["cpu_temp_mode"]
-        if type(d.get("nvidia_gamma")) is int and 40 <= d["nvidia_gamma"] <= 280:
-            self.nvidia_gamma = d["nvidia_gamma"]
-        if type(d.get("nvidia_contrast")) is int and 0 <= d["nvidia_contrast"] <= 100:
-            self.nvidia_contrast = d["nvidia_contrast"]
+        gamma_ok = lambda g: type(g) is int and 40 <= g <= 280
+        contrast_ok = lambda c: type(c) is int and 0 <= c <= 100
+        if gamma_ok(d.get("nvidia_gamma")) and contrast_ok(d.get("nvidia_contrast")):
+            self.legacy_display = (d["nvidia_gamma"], d["nvidia_contrast"])
+        if isinstance(d.get("nvidia_displays"), dict):
+            self.nvidia_displays = {
+                k: {"gamma": v["gamma"], "contrast": v["contrast"]}
+                for k, v in d["nvidia_displays"].items()
+                if isinstance(k, str) and isinstance(v, dict)
+                and gamma_ok(v.get("gamma")) and contrast_ok(v.get("contrast"))}
         ws = d.get("window")
         if isinstance(ws, list) and len(ws) == 2 and all(isinstance(x, int) for x in ws):
             self.win_size = ws
@@ -164,12 +162,11 @@ class Config:
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w", encoding="utf-8") as f:
-                json.dump({"toggles": self.toggles, "applied": self.applied,
+                json.dump({"applied": self.applied,
                            "download_dir": self.download_dir,
                            "smooth_scroll": self.smooth_scroll,
                            "cpu_temp_mode": self.cpu_temp_mode,
-                           "nvidia_gamma": self.nvidia_gamma,
-                           "nvidia_contrast": self.nvidia_contrast,
+                           "nvidia_displays": self.nvidia_displays,
                            "window": self.win_size}, f, indent=2)
             return True
         except OSError:
@@ -180,6 +177,26 @@ class Config:
 
 def lerp(a, b, t):
     return a + (b - a) * t
+
+
+def draw_spotlight(p, path, rect, center, strength, radius, alpha):
+    """Soft white glow around `center`, clipped to `path`; `strength` (0..1) is the animated hover amount.
+    Buttons, the closed dropdown and the dropdown rows all use this so they share one highlight look."""
+    a = alpha * strength
+    if a < 0.05:
+        return
+    glow = QRadialGradient(center, radius)
+    for stop, k in ((0.0, 1.0), (0.3, 0.55), (0.65, 0.16), (1.0, 0.0)):
+        c = QColor(255, 255, 255)
+        c.setAlphaF(a * k / 255.0)
+        glow.setColorAt(stop, c)
+    p.save()
+    p.setClipPath(path)
+    p.fillRect(rect, QBrush(glow))
+    p.restore()
+
+
+BUTTON_GLOW, DROPDOWN_GLOW = 36, 26  # peak glow alpha; the dropdown stays a step dimmer than buttons
 
 
 class AnimButton(QPushButton):
@@ -235,20 +252,23 @@ class AnimButton(QPushButton):
 
     def enterEvent(self, e):
         self.snap_cursor(e.position())
-        self.go(self.a_hover, 1.0, 140)
+        self.go(self.a_hover, 1.0, 280, QEasingCurve.InOutSine)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self.go(self.a_hover, 0.0, 200)
+        self.go(self.a_hover, 0.0, 360, QEasingCurve.InOutSine)
         super().leaveEvent(e)
 
     def mouseMoveEvent(self, e):
-        self.go(self.a_cursor, QPointF(e.position()), 55, QEasingCurve.OutQuad)
+        self.go(self.a_cursor, QPointF(e.position()), 130, QEasingCurve.OutCubic)
         super().mouseMoveEvent(e)
 
     def snap_cursor(self, pos):
         self.a_cursor.stop()
         self.set_cursor_position(QPointF(pos))
+
+    def spotlight(self, p, path, radius, alpha):
+        draw_spotlight(p, path, self.rect(), self._cursor_pos, self._hover, radius, alpha)
 
     def squish(self, p, strength=0.035):
         c = QRectF(self.rect()).center()
@@ -297,9 +317,9 @@ class LogView(QPlainTextEdit):
 
 class Button(AnimButton):
     KINDS = {
-        "ghost": dict(base=(15, 15, 15), hov=(26, 26, 26), text=(240, 240, 240), size=15, weight=QFont.Normal,
-                      px=22, py=11, r=11, dis=(10, 10, 10), dis_text=(90, 90, 90)),
-        "accent": dict(base=(236, 90, 190), hov=(236, 90, 190), text=(255, 255, 255), size=16, weight=QFont.Medium,
+        "ghost": dict(base=(11, 11, 11), text=(240, 240, 240), size=15, weight=QFont.Normal,
+                      px=22, py=11, r=11, dis=(8, 8, 8), dis_text=(90, 90, 90)),
+        "accent": dict(base=(236, 90, 190), text=(255, 255, 255), size=16, weight=QFont.Medium,
                        px=36, py=15, r=16, dis=(30, 30, 30), dis_text=(100, 100, 100)),
     }
     KINDS["pill"] = KINDS["ghost"]
@@ -394,7 +414,7 @@ class Button(AnimButton):
         elif lit:
             base, text = (52, 52, 52), (255, 255, 255)
         else:
-            base = tuple(lerp(a, b, self._hover) for a, b in zip(k["base"], k["hov"]))
+            base = k["base"]
             text = k["text"]
         dark = 1.0 - 0.08 * self._press
         base = tuple(max(0, int(c * dark)) for c in base)
@@ -415,9 +435,13 @@ class Button(AnimButton):
                 p.setClipping(False)
             else:
                 p.fillPath(path, QColor(*(int(c) for c in base)))
+            if on and not lit:
+                inner = QPainterPath()  # inside the 1px border, so the stroke itself never changes
+                inner.addRoundedRect(r.adjusted(1, 1, -1, -1), k["r"] - 1, k["r"] - 1)
+                self.spotlight(p, inner, 58, BUTTON_GLOW)
             edge = QPainterPath()
             edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), k["r"], k["r"])
-            p.setPen(QPen(QColor(255, 255, 255, int(22 + 14 * self._hover)), 1))
+            p.setPen(QPen(QColor(255, 255, 255, 22), 1))
             p.drawPath(edge)
         p.restore()
         p.setPen(QColor(*text))
@@ -470,7 +494,8 @@ class NavButton(AnimButton):
         r = QRectF(self.rect())
         path = QPainterPath()
         path.addRoundedRect(r, 10, 10)
-        p.fillPath(path, QColor(255, 255, 255, int(8 * h * (1 - s) + 20 * s)))
+        p.fillPath(path, QColor(255, 255, 255, int(20 * s)))
+        self.spotlight(p, path, 150, BUTTON_GLOW * 0.85 * (1 - s))
         t = max(s, h * 0.7)
         c = QColor(int(lerp(122, 255, t)), int(lerp(122, 255, t)), int(lerp(122, 255, t)))
         p.setPen(c)
@@ -812,7 +837,7 @@ class SpecRow(HoverFrame):
         for w in (self.name, self.value, self.hint):
             w.setAttribute(Qt.WA_TransparentForMouseEvents)
         lay.addWidget(self.name, 0, Qt.AlignTop)
-        lay.addWidget(self.value, 1)
+        lay.addWidget(self.value, 1, Qt.AlignTop)
         if button is not None:
             lay.addWidget(button, 0, Qt.AlignTop)
         lay.addWidget(self.hint, 0, Qt.AlignTop)
@@ -925,46 +950,35 @@ class TaskRow(Row):
             self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
             self.revert.clicked.connect(on_revert)
             self.right.addWidget(self.revert)
-        self.toggle = Toggle()
-        self.right.addWidget(self.toggle)
+        self.toggle = None
+        if on_apply is None:  # a row without an Apply button (Settings) is controlled by its switch
+            self.toggle = Toggle()
+            self.right.addWidget(self.toggle)
 
-    def set_active(self, active, selected=None):
+    def set_active(self, active):
         if self.apply is None:
             return
         self.apply.setText("Applied" if active else "Apply")
         self.apply.setEnabled(not active)
         self.revert.setEnabled(active and self.reversible)
-        if active:
-            self.toggle.set_quiet(True)
-        elif selected is not None:
-            self.toggle.set_quiet(selected)
-        self.toggle.setEnabled(not active)
 
 
 class RunRow(Row):
     """Single-use action: one click runs it."""
 
-    def __init__(self, title, subtitle, on_run, on_revert, active=False):
+    def __init__(self, title, subtitle, on_run, active=False):
         super().__init__(title, subtitle)
+        self.sub.setWordWrap(True)
         self.b = Button("Run")
         self.b.setCursor(Qt.PointingHandCursor)
         self.b.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.b.clicked.connect(on_run)
         self.right.addWidget(self.b)
-        self.revert = Button("Revert")
-        self.revert.setCursor(Qt.PointingHandCursor)
-        self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
-        self.revert.clicked.connect(on_revert)
-        self.right.addWidget(self.revert)
-        spacer = QWidget()
-        spacer.setFixedSize(46, 26)
-        self.right.addWidget(spacer)
         self.set_active(active)
 
     def set_active(self, active):
         self.b.setText("Applied" if active else "Run")
         self.b.setEnabled(not active)
-        self.revert.setEnabled(active)
 
 
 class ActionRow(Row):
@@ -1020,6 +1034,29 @@ class ActionRow(Row):
                 b.setText({"done": done, "cancelled": label}.get(job.state, "Retry"))
 
 
+class ElidedLabel(QLabel):
+    """Single-line label that truncates with an ellipsis (full text in the tooltip) instead of widening its parent."""
+
+    def __init__(self, text=""):
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setText(text)
+
+    def setText(self, text):
+        super().setText(text)
+        self.setToolTip(text)
+
+    def minimumSizeHint(self):
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        r = self.contentsRect()
+        p.setPen(self.palette().windowText().color())
+        p.drawText(r, Qt.AlignLeft | Qt.AlignVCenter,
+                   self.fontMetrics().elidedText(self.text(), Qt.ElideRight, r.width()))
+
+
 class JobRow(HoverFrame):
     def __init__(self, job, kernel):
         super().__init__()
@@ -1031,10 +1068,10 @@ class JobRow(HoverFrame):
         lay.addWidget(kernel.make_icon(job.key or job.name, job.domain, job.name))
         col = QVBoxLayout()
         col.setSpacing(5)
-        name = QLabel(job.name)
+        name = ElidedLabel(job.name)
         name.setStyleSheet("font-size: 17px;")
         self.bar = Bar()
-        self.status = QLabel()
+        self.status = ElidedLabel()
         self.status.setObjectName("muted")
         col.addWidget(name)
         col.addWidget(self.bar)
@@ -1307,23 +1344,319 @@ def blurred(pm, radius=18):
 
 # ---------- main window ----------
 
+class PopupBackdrop(QWidget):
+    """Frosted-glass fill behind a dropdown list: a blurred copy of the window beneath it, tinted dark."""
+
+    def __init__(self, container, combo):
+        super().__init__(container)
+        self.combo = combo
+        self.blur = None
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        container.installEventFilter(self)
+        self.setGeometry(container.rect())
+        self.lower()
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Resize, QEvent.Show):
+            self.setGeometry(obj.rect())
+            self.lower()
+        return False
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
+        p.setClipPath(path)
+        p.fillPath(path, QColor(14, 14, 14))
+        if self.blur is not None:
+            win = self.combo.window()
+            k = self.blur.width() / max(win.width(), 1)
+            origin = win.mapFromGlobal(self.mapToGlobal(QPoint(0, 0)))
+            p.drawPixmap(QRectF(self.rect()), self.blur,
+                         QRectF(origin.x() * k, origin.y() * k, self.width() * k, self.height() * k))
+            p.fillPath(path, QColor(14, 14, 14, 115))
+        p.setClipping(False)
+        p.setPen(QPen(QColor(255, 255, 255, 34), 1))
+        p.drawPath(path)
+
+
+class ComboItemDelegate(QStyledItemDelegate):
+    """Dropdown rows drawn by hand: exact row sizes, and the same soft cursor glow as the buttons,
+    faded in and out per row. The current choice gets a flat fill that hovering never changes."""
+    ROW, GAP = 36, 2
+    SELECTED_FILL = 32
+    FADE_IN_MS, FADE_OUT_MS = 220, 320
+
+    def __init__(self, combo):
+        super().__init__(combo)
+        self.list_view = combo.view()
+        self.strength = {}
+        self.target = None
+        self.cursor = QPointF()
+        self.last = 0.0
+        self.clock = QTimer(self)
+        self.clock.setInterval(16)
+        self.clock.timeout.connect(self.tick)
+        self.list_view.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind == QEvent.MouseMove:
+            self.cursor = QPointF(event.position())
+            index = self.list_view.indexAt(event.position().toPoint())
+            self.set_target(index.row() if index.isValid() else None)
+            self.list_view.viewport().update()
+        elif kind == QEvent.Leave:
+            self.set_target(None)
+        elif kind == QEvent.Hide:
+            self.clock.stop()
+            self.strength.clear()
+            self.target = None
+        return False
+
+    def set_target(self, row):
+        self.target = row
+        if not self.clock.isActive():
+            self.last = time.monotonic()
+            self.clock.start()
+
+    def tick(self):
+        now = time.monotonic()
+        dt = (now - self.last) * 1000
+        self.last = now
+        busy = False
+        for row in set(self.strength) | ({self.target} - {None}):
+            s = self.strength.get(row, 0.0)
+            if row == self.target:
+                s = min(1.0, s + dt / self.FADE_IN_MS)
+                busy |= s < 1.0
+            else:
+                s = max(0.0, s - dt / self.FADE_OUT_MS)
+                busy |= s > 0.0
+            if s > 0.0:
+                self.strength[row] = s
+            else:
+                self.strength.pop(row, None)
+        self.list_view.viewport().update()
+        if not busy:
+            self.clock.stop()
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.ROW + self.GAP)
+
+    def paint(self, p, option, index):
+        p.save()
+        p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        rect = QRectF(option.rect).adjusted(0, self.GAP / 2, 0, -self.GAP / 2)
+        path = QPainterPath()
+        path.addRoundedRect(rect, 9, 9)
+        if option.state & QStyle.State_Selected:
+            p.fillPath(path, QColor(255, 255, 255, self.SELECTED_FILL))
+        else:
+            s = self.strength.get(index.row(), 0.0)
+            if s > 0.0:
+                eased = (1.0 - math.cos(math.pi * s)) / 2.0
+                p.fillPath(path, QColor(255, 255, 255, int(7 * eased)))
+                draw_spotlight(p, path, rect, self.cursor, eased, 90, DROPDOWN_GLOW)
+        font = QFont(option.font)
+        font.setPixelSize(15)
+        p.setFont(font)
+        p.setPen(QColor(TEXT))
+        text_rect = rect.adjusted(14, 0, -14, 0)
+        text = QFontMetrics(font).elidedText(str(index.data(Qt.DisplayRole) or ""), Qt.ElideRight,
+                                             int(text_rect.width()))
+        p.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, text)
+        p.restore()
+
+
+class ZoomEffect(QGraphicsEffect):
+    """Draws its widget slightly scaled around the top (or bottom) centre, to ease a dropdown in and out."""
+
+    def __init__(self):
+        super().__init__()
+        self.zoom = 1.0
+        self.from_bottom = False
+
+    def set_zoom(self, zoom):
+        self.zoom = zoom
+        self.update()
+
+    def draw(self, painter):
+        offset = QPoint()
+        pm = self.sourcePixmap(Qt.LogicalCoordinates, offset, QGraphicsEffect.NoPad)
+        ratio = pm.devicePixelRatio()
+        anchor = QPointF(offset.x() + pm.width() / ratio / 2,
+                         offset.y() + (pm.height() / ratio if self.from_bottom else 0))
+        painter.save()
+        painter.setRenderHints(QPainter.SmoothPixmapTransform | QPainter.Antialiasing)
+        painter.translate(anchor)
+        painter.scale(self.zoom, self.zoom)
+        painter.translate(-anchor)
+        painter.drawPixmap(offset, pm)
+        painter.restore()
+
+
 class FluentCombo(QComboBox):
+    FADE_IN_MS, FADE_OUT_MS = 320, 220
+    ZOOM_FROM = 0.965
+
     def __init__(self):
         super().__init__()
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedWidth(190)
+        self._hover = 0.0
+        self._cursor_pos = QPointF()
+        self._closing = False
+        self._progress = 1.0
+        self._fx = []
+        self.zoom_from_bottom = False
+        self.a_hover = QPropertyAnimation(self, b"hoverMix", self)
+        self.a_cursor = QPropertyAnimation(self, b"cursorPosition", self)
+        self.setMouseTracking(True)
+        self.installEventFilter(self)
+
+        QApplication.setEffectEnabled(Qt.UI_AnimateCombo, False)  # Qt's own top-down reveal
+        self.setItemDelegate(ComboItemDelegate(self))
         popup = self.view().window()
         popup.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         popup.setAttribute(Qt.WA_TranslucentBackground)
+        popup.setStyleSheet("QComboBoxPrivateContainer { background: transparent; border: none; }")
+        self.view().viewport().setAutoFillBackground(False)
+        self._backdrop = PopupBackdrop(popup, self)
+        self._fade = QPropertyAnimation(self, b"popupProgress", self)
+        self._fade.finished.connect(self._fade_finished)
+
+    def get_hover_mix(self):
+        return self._hover
+
+    def set_hover_mix(self, v):
+        self._hover = v
+        self.update()
+
+    hoverMix = Property(float, get_hover_mix, set_hover_mix)
+
+    def get_cursor_position(self):
+        return self._cursor_pos
+
+    def set_cursor_position(self, pos):
+        self._cursor_pos = pos
+        self.update()
+
+    cursorPosition = Property(QPointF, get_cursor_position, set_cursor_position)
+
+    def glide(self, anim, end, ms, curve):
+        anim.stop()
+        anim.setDuration(ms)
+        anim.setEasingCurve(curve)
+        anim.setStartValue(anim.targetObject().property(bytes(anim.propertyName()).decode()))
+        anim.setEndValue(end)
+        anim.start()
+
+    def eventFilter(self, obj, event):
+        if obj is self:
+            kind = event.type()
+            if kind == QEvent.Enter:
+                self.a_cursor.stop()
+                self.set_cursor_position(QPointF(event.position()))
+                self.glide(self.a_hover, 1.0, 280, QEasingCurve.InOutSine)
+            elif kind == QEvent.Leave:
+                self.glide(self.a_hover, 0.0, 360, QEasingCurve.InOutSine)
+            elif kind == QEvent.MouseMove:
+                self.glide(self.a_cursor, QPointF(event.position()), 130, QEasingCurve.OutCubic)
+        return super().eventFilter(obj, event)
+
+    def showPopup(self):
+        popup = self.view().window()
+        self._closing = False
+        self._backdrop.blur = blurred(self.window().grab(), radius=10)
+        self._fade.stop()
+        self.set_zoom_effects(True)
+        self.set_progress(0.0)
+        super().showPopup()
+        self.zoom_from_bottom = popup.y() < self.mapToGlobal(QPoint(0, 0)).y()  # opened upwards
+        for fx in self._fx:
+            fx.from_bottom = self.zoom_from_bottom
+        self.set_progress(0.0)
+        self.fade_popup(1.0, self.FADE_IN_MS)
+
+    def hidePopup(self):
+        popup = self.view().window()
+        if self._closing or not popup.isVisible():
+            self._closing = False
+            self._fade.stop()
+            super().hidePopup()
+            return
+        self._closing = True
+        if not self._fx:
+            self.set_zoom_effects(True)
+            for fx in self._fx:
+                fx.from_bottom = self.zoom_from_bottom
+        self.fade_popup(0.0, self.FADE_OUT_MS)
+
+    def fade_popup(self, target, ms):
+        self._fade.stop()
+        self._fade.setDuration(ms)
+        self._fade.setEasingCurve(QEasingCurve.InOutSine)
+        self._fade.setStartValue(self._progress)
+        self._fade.setEndValue(target)
+        self._fade.start()
+
+    def _fade_finished(self):
+        if self._closing:
+            self._closing = False
+            super().hidePopup()
+            self.set_zoom_effects(False)  # kept while open so the text doesn't change rendering mid-way
+
+    def set_zoom_effects(self, on):
+        for widget in (self.view(), self._backdrop):
+            widget.setGraphicsEffect(None)
+        self._fx = []
+        if on:
+            for widget in (self.view(), self._backdrop):
+                fx = ZoomEffect()
+                widget.setGraphicsEffect(fx)
+                self._fx.append(fx)
+
+    def get_progress(self):
+        return self._progress
+
+    def set_progress(self, v):
+        """0 = hidden and slightly shrunk, 1 = fully shown; drives the fade and the zoom together."""
+        self._progress = v
+        self.view().window().setWindowOpacity(v)
+        zoom = self.ZOOM_FROM + (1.0 - self.ZOOM_FROM) * v
+        for fx in self._fx:
+            if isValid(fx):
+                fx.set_zoom(zoom)
+
+    popupProgress = Property(float, get_progress, set_progress)
 
     def paintEvent(self, e):
+        # same material as the buttons: flat dark fill, constant 1px border, soft glow under the cursor
+        p = QPainter(self)
+        p.setRenderHints(QPainter.Antialiasing)
+        r = QRectF(self.rect())
+        path = QPainterPath()
+        path.addRoundedRect(r, 11, 11)
+        p.fillPath(path, QColor(11, 11, 11))
+        inner = QPainterPath()
+        inner.addRoundedRect(r.adjusted(1, 1, -1, -1), 10, 10)
+        draw_spotlight(p, inner, self.rect(), self._cursor_pos, self._hover, 58, DROPDOWN_GLOW)
+        edge = QPainterPath()
+        edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 11, 11)
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.drawPath(edge)
+        p.end()
         super().paintEvent(e)
+        h = self._hover
         p = QPainter(self)
         p.setRenderHint(QPainter.TextAntialiasing)
         f = QFont("Segoe Fluent Icons")
         f.setPixelSize(12)
         p.setFont(f)
-        p.setPen(QColor(MUTED))
+        arrow_alpha = int(122 + (200 - 122) * h)
+        p.setPen(QColor(arrow_alpha, arrow_alpha, arrow_alpha))
         p.drawText(self.rect().adjusted(0, 0, -14, 0), Qt.AlignRight | Qt.AlignVCenter, "\uE70D")
 
 
@@ -1432,21 +1765,6 @@ class Kernel(QWidget):
         self.navs.sort(key=lambda b: b[0])
         self.navs[0][1].setChecked(True)
 
-        self.footer = QFrame()
-        self.footer.setObjectName("footer")
-        self.footer.setFixedHeight(68)
-        fl = QHBoxLayout(self.footer)
-        fl.setContentsMargins(36, 0, 36, 0)
-        self.status = QLabel("Nothing selected")
-        self.status.setObjectName("muted")
-        fl.addWidget(self.status)
-        fl.addStretch()
-        self.btn = Button("Apply", "accent")
-        self.btn.setCursor(Qt.PointingHandCursor)
-        self.btn.clicked.connect(self.start)
-        fl.addWidget(self.btn)
-        rv.addWidget(self.footer)
-
         self.build_overlay()
 
         self.logged.connect(self.log.appendPlainText)
@@ -1454,19 +1772,12 @@ class Kernel(QWidget):
         self.jobs.added.connect(self.add_job_row)
 
         self.applied_states = {}
-        self.profile_pending = False
         for r, key, _, fn in self.rows:
-            actual = is_active(fn)
-            active = self.cfg.applied.get(key, actual)
-            if key in IRREVERSIBLE and actual:
-                active = True
+            active = is_active(fn)
             self.applied_states[key] = active
-            r.set_active(active, self.cfg.toggles.get(key, False))
-            r.toggle.toggled.connect(self.on_toggle)
-            self.profile_pending |= active != actual
+            r.set_active(active)
         for job in self.jobs.load():
             self.add_job_row(job)
-        self.update_status()
         self.update_pill()
         if not is_admin():
             self.logged.emit("Not running as administrator - admin tasks will fail.")
@@ -1486,13 +1797,14 @@ class Kernel(QWidget):
         h.setStyleSheet("font-size: 20px; font-weight: 500;")
         head.addWidget(h)
         head.addStretch()
-        clear = Button("Clear finished")
+        clear = Button("Clear completed")
         clear.setCursor(Qt.PointingHandCursor)
         clear.clicked.connect(self.clear_finished)
         head.addWidget(clear)
         pl.addLayout(head)
         self.dl_hint = QLabel("No downloads yet. Anything you download or install shows up here.")
         self.dl_hint.setObjectName("muted")
+        self.dl_hint.setStyleSheet("font-size: 16px;")
         self.dl_hint.setWordWrap(True)
         pl.addWidget(self.dl_hint)
         scroll = QScrollArea()
@@ -1659,7 +1971,6 @@ class Kernel(QWidget):
             self.refresh_display_status()
         if index == SPECS:
             self.start_monitor()
-        self.footer.setVisible(index in (TWEAKS, GAMING))
         page = self.stack.currentWidget()
         fx = QGraphicsOpacityEffect(page)
         fx.setOpacity(0.0)
@@ -1762,193 +2073,398 @@ class Kernel(QWidget):
         page.col.addStretch()
         return page
 
+    @staticmethod
+    def display_key(name):
+        return (name or "").casefold()
+
     def add_display_controls(self, page):
         page.section("Display")
+        self.display_applied = {}
+        self.vibrance_range = None
+
+        try:
+            displays = display_controls.get_all_displays()
+        except OSError:
+            displays = []
+        try:
+            primary = display_controls._primary_device_name()
+        except OSError:
+            primary = None
+        self.display_combo = FluentCombo()
+        for name, label in displays:
+            self.display_combo.addItem(label, name)
+        if not displays:
+            self.display_combo.addItem("Primary display", primary)
+        for i in range(self.display_combo.count()):
+            if self.display_key(self.display_combo.itemData(i)) == self.display_key(primary):
+                self.display_combo.setCurrentIndex(i)
+        self.current_display = self.display_combo.currentData()
+        display_row = Row("Display", "Choose which monitor the settings below apply to")
+        display_row.right.addWidget(self.display_combo)
+        page.add(display_row)
+
         self.refresh_row = Row(
             "Highest refresh rate",
-            "Checking the primary NVIDIA display's highest rate at its current resolution...")
+            "Checking this display's highest rate at its current resolution...")
         self.refresh_row.setObjectName("row")
         self.highest_refresh_button = Button("Check")
         self.highest_refresh_button.clicked.connect(self.apply_highest_refresh)
         self.refresh_row.right.addWidget(self.highest_refresh_button)
         page.add(self.refresh_row)
-        self.display_status = QLabel(
-            "Settings are applied through the NVIDIA driver; the NVIDIA App is not required."
-            if self.nvidia_control else
-            f"NVIDIA display controls are unavailable: {self.nvidia_error}")
+        self.display_status = QLabel("")
         self.display_status.setObjectName("muted")
         self.display_status.setWordWrap(True)
         self.display_status.setContentsMargins(16, 0, 16, 0)
         page.col.addWidget(self.display_status)
 
+        def make_input():
+            edit = QLineEdit()
+            edit.setFixedWidth(100)
+            edit.setMinimumHeight(32)
+            edit.setAlignment(Qt.AlignCenter)
+            return edit
+
+        def add_slider_row(title, subtitle, value_label, edit, slider):
+            row = Row(title, subtitle)
+            row.right.addWidget(value_label)
+            row.right.addWidget(edit)
+            row.right.addWidget(slider)
+            page.add(row)
+
         self.gamma_slider = QSlider(Qt.Horizontal)
         self.gamma_slider.setRange(40, 280)
-        self.gamma_slider.setValue(self.cfg.nvidia_gamma)
         self.gamma_slider.setFixedWidth(220)
-        self.gamma_value = QLabel(f"{self.cfg.nvidia_gamma / 100:.2f}")
-        self.gamma_slider.valueChanged.connect(self.queue_gamma_contrast)
-        gamma = Row("Gamma", "Adjust the NVIDIA driver gamma correction")
-        gamma.right.addWidget(self.gamma_value)
-        gamma.right.addWidget(self.gamma_slider)
-        page.add(gamma)
+        self.gamma_value = QLabel()
+        self.gamma_input = make_input()
+        add_slider_row("Gamma", "Adjust the NVIDIA driver gamma correction",
+                       self.gamma_value, self.gamma_input, self.gamma_slider)
 
         self.contrast_slider = QSlider(Qt.Horizontal)
         self.contrast_slider.setRange(0, 100)
-        self.contrast_slider.setValue(self.cfg.nvidia_contrast)
         self.contrast_slider.setFixedWidth(220)
-        self.contrast_value = QLabel(f"{self.cfg.nvidia_contrast}%")
-        self.contrast_slider.valueChanged.connect(self.queue_gamma_contrast)
-        contrast = Row("Contrast", "Adjust contrast through the NVIDIA driver")
-        contrast.right.addWidget(self.contrast_value)
-        contrast.right.addWidget(self.contrast_slider)
-        page.add(contrast)
-
-        self.gamma_contrast_timer = QTimer(self)
-        self.gamma_contrast_timer.setSingleShot(True)
-        self.gamma_contrast_timer.timeout.connect(self.apply_gamma_contrast)
-        self.gamma_slider.sliderReleased.connect(lambda: self.gamma_contrast_timer.start(0))
-        self.contrast_slider.sliderReleased.connect(lambda: self.gamma_contrast_timer.start(0))
+        self.contrast_value = QLabel()
+        self.contrast_input = make_input()
+        add_slider_row("Contrast", "Adjust contrast through the NVIDIA driver",
+                       self.contrast_value, self.contrast_input, self.contrast_slider)
 
         self.vibrance_slider = QSlider(Qt.Horizontal)
         self.vibrance_slider.setFixedWidth(220)
-        self.vibrance_value = QLabel("Unavailable")
-        self.vibrance_range = None
-        vibrance = Row("Digital vibrance", "Adjust NVIDIA digital vibrance")
-        vibrance.right.addWidget(self.vibrance_value)
-        vibrance.right.addWidget(self.vibrance_slider)
-        page.add(vibrance)
-        self.vibrance_slider.valueChanged.connect(self.queue_vibrance)
+        self.vibrance_value = QLabel()
+        self.vibrance_input = make_input()
+        add_slider_row("Digital vibrance", "Adjust NVIDIA digital vibrance",
+                       self.vibrance_value, self.vibrance_input, self.vibrance_slider)
+
+        self.gamma_contrast_timer = QTimer(self)
+        self.gamma_contrast_timer.setSingleShot(True)
+        self.gamma_contrast_timer.timeout.connect(self.push_gamma_contrast)
         self.vibrance_timer = QTimer(self)
         self.vibrance_timer.setSingleShot(True)
-        self.vibrance_timer.timeout.connect(self.apply_vibrance)
+        self.vibrance_timer.timeout.connect(self.push_vibrance)
+        self.gamma_slider.valueChanged.connect(self.queue_gamma_contrast)
+        self.contrast_slider.valueChanged.connect(self.queue_gamma_contrast)
+        self.vibrance_slider.valueChanged.connect(self.queue_vibrance)
+        self.gamma_slider.sliderReleased.connect(lambda: self.gamma_contrast_timer.start(0))
+        self.contrast_slider.sliderReleased.connect(lambda: self.gamma_contrast_timer.start(0))
         self.vibrance_slider.sliderReleased.connect(lambda: self.vibrance_timer.start(0))
+        self.gamma_input.editingFinished.connect(self.gamma_input_changed)
+        self.contrast_input.editingFinished.connect(self.contrast_input_changed)
+        self.vibrance_input.editingFinished.connect(self.vibrance_input_changed)
 
-        if self.nvidia_control is None:
-            for slider in (self.gamma_slider, self.contrast_slider, self.vibrance_slider):
-                slider.setEnabled(False)
-            self.gamma_value.setText("Unavailable")
-            self.contrast_value.setText("Unavailable")
-        else:
-            if self.nvidia_control.supports_gamma_contrast:
-                if self.cfg.nvidia_gamma != 100 or self.cfg.nvidia_contrast != 50:
-                    self.apply_gamma_contrast()
-            else:
-                self.gamma_slider.setEnabled(False)
-                self.contrast_slider.setEnabled(False)
-                self.gamma_value.setText("Unavailable")
-                self.contrast_value.setText("Unavailable")
-                self.display_status.setText(
-                    f"{self.display_status.text()} NVIDIA gamma-correction control is unavailable.")
+        controls = Row("Display settings", "Changes preview live and are only kept once you press Apply")
+        self.display_reset_button = Button("Reset")
+        self.display_reset_button.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
+        self.display_reset_button.clicked.connect(self.reset_display_values)
+        self.display_apply_button = Button("Apply")
+        self.display_apply_button.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
+        self.display_apply_button.clicked.connect(self.apply_display_settings)
+        controls.right.addWidget(self.display_reset_button)
+        controls.right.addWidget(self.display_apply_button)
+        page.add(controls)
 
-            if not self.nvidia_control.supports_vibrance:
-                self.vibrance_slider.setEnabled(False)
-                self.display_status.setText(
-                    f"{self.display_status.text()} NVIDIA digital-vibrance control is unavailable.")
-            else:
-                try:
-                    minimum, maximum, current = self.nvidia_control.vibrance_info()
-                    self.vibrance_range = (minimum, maximum)
-                    self.vibrance_slider.setRange(minimum, maximum)
-                    self.vibrance_slider.setValue(current)
-                    self.vibrance_value.setText(self.vibrance_text(current))
-                except display_controls.UnsupportedDisplay as ex:
-                    self.vibrance_slider.setEnabled(False)
-                    self.display_status.setText(f"{self.display_status.text()} {ex}")
-
+        self.migrate_legacy_display_cfg()
+        self.apply_saved_display_settings()
+        self.load_display(self.current_display)
         self.refresh_display_status()
+        self.display_combo.currentIndexChanged.connect(self.on_display_changed)
 
-    def refresh_display_status(self):
-        if self.nvidia_control is None:
-            self.refresh_row.sub.setText("Unavailable without an active NVIDIA display output.")
-            self.highest_refresh_button.setText("Unavailable")
-            self.highest_refresh_button.setEnabled(False)
+    def migrate_legacy_display_cfg(self):
+        legacy, self.cfg.legacy_display = self.cfg.legacy_display, None
+        if not legacy:
             return
         try:
-            info = display_controls.refresh_info()
-        except display_controls.DisplayError as ex:
-            self.refresh_row.sub.setText(str(ex))
-            self.highest_refresh_button.setText("Unavailable")
-            self.highest_refresh_button.setEnabled(False)
-            self.refresh_row.setObjectName("row")
-            self.refresh_row.style().unpolish(self.refresh_row)
-            self.refresh_row.style().polish(self.refresh_row)
+            primary = display_controls._primary_device_name()
+        except OSError:
+            primary = None
+        if primary:
+            self.cfg.nvidia_displays.setdefault(
+                self.display_key(primary), {"gamma": legacy[0], "contrast": legacy[1]})
+
+    def apply_saved_display_settings(self):
+        control = self.nvidia_control
+        if control is None or not control.supports_gamma_contrast:
             return
-        if info["device"].casefold() != self.nvidia_control.display_name.casefold():
-            self.refresh_row.sub.setText(
-                "The primary display is no longer connected to the active NVIDIA output.")
-            self.highest_refresh_button.setText("Unavailable")
-            self.highest_refresh_button.setEnabled(False)
-            self.refresh_row.setObjectName("row")
-            self.refresh_row.style().unpolish(self.refresh_row)
-            self.refresh_row.style().polish(self.refresh_row)
-            return
-        current, highest = info["current"], info["highest"]
-        if highest > current:
-            self.refresh_row.sub.setText(
-                f"Highest refresh rate not applied · Current {current} Hz · Available {highest} Hz "
-                f"at {info['width']}×{info['height']}.")
-            self.highest_refresh_button.setText(f"Apply {highest} Hz")
-            self.highest_refresh_button.setEnabled(True)
-            self.refresh_row.setObjectName("attention")
+        for name in control.display_names:
+            saved = self.cfg.nvidia_displays.get(self.display_key(name))
+            if not saved or (saved["gamma"], saved["contrast"]) == (100, 50):
+                continue
+            if control.select(name):
+                try:
+                    control.set_gamma_contrast(saved["gamma"] / 100, saved["contrast"])
+                except display_controls.DisplayError as ex:
+                    self.logged.emit(f"NVIDIA display adjustment failed for {name}: {ex}")
+
+    def load_display(self, name):
+        """Show the kept (applied) values of a display in the controls and enable what it supports."""
+        control = self.nvidia_control
+        supported = control is not None and control.select(name)
+        gamma_ok = supported and control.supports_gamma_contrast
+        vibrance_ok = supported and control.supports_vibrance
+        if control is None:
+            status = f"NVIDIA display controls are unavailable: {self.nvidia_error}"
+        elif not supported:
+            status = ("This display is not connected to an NVIDIA output, so gamma, contrast and "
+                      "digital vibrance can't be changed for it.")
         else:
-            self.refresh_row.sub.setText(
-                f"Highest available rate is active · {current} Hz at {info['width']}×{info['height']}.")
-            self.highest_refresh_button.setText("Applied")
-            self.highest_refresh_button.setEnabled(False)
-            self.refresh_row.setObjectName("row")
+            status = ("Settings are applied through the NVIDIA driver; the NVIDIA App is not required. "
+                      "Changes preview live and are only kept once you press Apply.")
+            if not gamma_ok:
+                status += " NVIDIA gamma-correction control is unavailable."
+
+        self.vibrance_range = None
+        state = None
+        if supported:
+            key = self.display_key(name)
+            state = self.display_applied.get(key)
+            if state is None:
+                saved = self.cfg.nvidia_displays.get(key, {})
+                state = {"gamma": saved.get("gamma", 100), "contrast": saved.get("contrast", 50),
+                         "vibrance": None}
+                self.display_applied[key] = state
+            if vibrance_ok:
+                try:
+                    low, high, current = control.vibrance_info()
+                except display_controls.DisplayError as ex:
+                    vibrance_ok = False
+                    status += f" {ex}"
+                else:
+                    self.vibrance_range = (low, high)
+                    if state["vibrance"] is None:
+                        state["vibrance"] = current
+            else:
+                status += " NVIDIA digital-vibrance control is unavailable."
+
+        self.display_status.setText(status)
+        for widget in (self.gamma_slider, self.gamma_input, self.contrast_slider, self.contrast_input):
+            widget.setEnabled(bool(gamma_ok))
+        for widget in (self.vibrance_slider, self.vibrance_input):
+            widget.setEnabled(bool(vibrance_ok))
+        self.display_reset_button.setEnabled(bool(gamma_ok or vibrance_ok))
+        self.display_apply_button.setEnabled(bool(gamma_ok or vibrance_ok))
+        self.set_display_controls(
+            state["gamma"] if gamma_ok else None,
+            state["contrast"] if gamma_ok else None,
+            state["vibrance"] if vibrance_ok else None)
+
+    def set_display_controls(self, gamma, contrast, vibrance):
+        """Move the sliders without triggering a live preview; None shows a control as unavailable."""
+        sliders = (self.gamma_slider, self.contrast_slider, self.vibrance_slider)
+        for slider in sliders:
+            slider.blockSignals(True)
+        if gamma is not None:
+            self.gamma_slider.setValue(gamma)
+            self.contrast_slider.setValue(contrast)
+        if vibrance is not None and self.vibrance_range:
+            self.vibrance_slider.setRange(*self.vibrance_range)
+            self.vibrance_slider.setValue(vibrance)
+        for slider in sliders:
+            slider.blockSignals(False)
+        if gamma is None:
+            for label, edit in ((self.gamma_value, self.gamma_input), (self.contrast_value, self.contrast_input)):
+                label.setText("Unavailable")
+                edit.setText("")
+        else:
+            self.show_gamma_contrast()
+        if vibrance is None:
+            self.vibrance_value.setText("Unavailable")
+            self.vibrance_input.setText("")
+        else:
+            self.show_vibrance()
+
+    def display_values(self):
+        """((gamma, contrast) or None, vibrance or None) currently shown for the selected display."""
+        gamma = ((self.gamma_slider.value(), self.contrast_slider.value())
+                 if self.gamma_slider.isEnabled() else None)
+        vibrance = (self.vibrance_slider.value()
+                    if self.vibrance_slider.isEnabled() and self.vibrance_range else None)
+        return gamma, vibrance
+
+    def display_dirty(self):
+        state = self.display_applied.get(self.display_key(self.current_display))
+        if state is None or self.nvidia_control is None:
+            return False
+        gamma, vibrance = self.display_values()
+        return bool((gamma is not None and gamma != (state["gamma"], state["contrast"]))
+                    or (vibrance is not None and vibrance != state["vibrance"]))
+
+    def revert_display(self):
+        """Drop live previews: put the driver back to the kept values of the selected display."""
+        self.gamma_contrast_timer.stop()
+        self.vibrance_timer.stop()
+        if not self.display_dirty():
+            return
+        control = self.nvidia_control
+        state = self.display_applied[self.display_key(self.current_display)]
+        gamma, vibrance = self.display_values()
+        if not control.select(self.current_display):
+            return
+        try:
+            if gamma is not None and gamma != (state["gamma"], state["contrast"]):
+                control.set_gamma_contrast(state["gamma"] / 100, state["contrast"])
+            if vibrance is not None and vibrance != state["vibrance"]:
+                control.set_vibrance(state["vibrance"])
+        except display_controls.DisplayError as ex:
+            self.logged.emit(f"Could not restore the previous display settings: {ex}")
+
+    def on_display_changed(self, *_):
+        self.revert_display()
+        self.current_display = self.display_combo.currentData()
+        self.load_display(self.current_display)
+        self.refresh_display_status()
+
+    def reset_display_values(self):
+        """Preview gamma 1.00, contrast 50 and vibrance 50; Apply keeps them."""
+        if self.gamma_slider.isEnabled():
+            self.gamma_slider.setValue(100)
+            self.contrast_slider.setValue(50)
+        if self.vibrance_slider.isEnabled() and self.vibrance_range:
+            low, high = self.vibrance_range
+            self.vibrance_slider.setValue(max(low, min(high, 50)))
+
+    def apply_display_settings(self):
+        control = self.nvidia_control
+        if control is None or not control.select(self.current_display):
+            return
+        self.gamma_contrast_timer.stop()
+        self.vibrance_timer.stop()
+        self.push_gamma_contrast()
+        self.push_vibrance()
+        gamma, vibrance = self.display_values()
+        key = self.display_key(self.current_display)
+        state = self.display_applied[key]
+        if gamma is not None:
+            state["gamma"], state["contrast"] = gamma
+            self.cfg.nvidia_displays[key] = {"gamma": gamma[0], "contrast": gamma[1]}
+        if vibrance is not None:
+            state["vibrance"] = vibrance
+        self.cfg.save()
+        self.logged.emit(f"Applied display settings to {self.display_combo.currentText()}.")
+
+    def set_refresh_row(self, text, button, enabled, attention=False):
+        self.refresh_row.sub.setText(text)
+        self.highest_refresh_button.setText(button)
+        self.highest_refresh_button.setEnabled(enabled)
+        self.refresh_row.setObjectName("attention" if attention else "row")
         self.refresh_row.style().unpolish(self.refresh_row)
         self.refresh_row.style().polish(self.refresh_row)
 
-    def apply_highest_refresh(self):
-        if self.nvidia_control is None:
-            return
+    def refresh_display_status(self):
         try:
-            display_controls.apply_highest_refresh(self.nvidia_control.display_name)
+            info = display_controls.refresh_info(self.current_display)
+        except (display_controls.DisplayError, OSError) as ex:
+            self.set_refresh_row(str(ex), "Unavailable", False)
+            return
+        current, highest = info["current"], info["highest"]
+        size = f"{info['width']}×{info['height']}"
+        if highest > current:
+            self.set_refresh_row(
+                f"Highest refresh rate not applied · Current {current} Hz · Available {highest} Hz at {size}.",
+                f"Apply {highest} Hz", True, True)
+        else:
+            self.set_refresh_row(
+                f"Highest available rate is active · {current} Hz at {size}.", "Applied", False)
+
+    def apply_highest_refresh(self):
+        try:
+            display_controls.apply_highest_refresh(self.current_display)
         except (display_controls.DisplayError, OSError) as ex:
             self.display_status.setText(f"Could not apply the highest refresh rate: {ex}")
             self.logged.emit(f"Display refresh-rate change failed: {ex}")
             return
         self.refresh_display_status()
-        self.logged.emit("Applied the highest refresh rate available for the primary display.")
-
-    def queue_gamma_contrast(self, value):
-        if self.sender() is self.gamma_slider:
-            self.gamma_value.setText(f"{value / 100:.2f}")
-        else:
-            self.contrast_value.setText(f"{value}%")
-        self.gamma_contrast_timer.start(350)
-
-    def apply_gamma_contrast(self):
-        if self.nvidia_control is None:
-            return
-        try:
-            self.nvidia_control.set_gamma_contrast(
-                self.gamma_slider.value() / 100, self.contrast_slider.value())
-        except display_controls.DisplayError as ex:
-            self.gamma_slider.setEnabled(False)
-            self.contrast_slider.setEnabled(False)
-            self.display_status.setText(f"NVIDIA gamma or contrast adjustment failed: {ex}")
-            self.logged.emit(f"NVIDIA display adjustment failed: {ex}")
-            return
-        self.cfg.nvidia_gamma = self.gamma_slider.value()
-        self.cfg.nvidia_contrast = self.contrast_slider.value()
-        self.cfg.save()
+        self.logged.emit(f"Applied the highest refresh rate available for {self.display_combo.currentText()}.")
 
     @staticmethod
     def vibrance_text(value):
         return f"{value}%" if 0 <= value <= 100 else str(value)
 
-    def queue_vibrance(self, value):
-        self.vibrance_value.setText(self.vibrance_text(value))
-        self.vibrance_timer.start(350)
+    def show_gamma_contrast(self):
+        gamma, contrast = self.gamma_slider.value(), self.contrast_slider.value()
+        self.gamma_value.setText(f"{gamma / 100:.2f}")
+        self.gamma_input.setText(f"{gamma / 100:.2f}")
+        self.contrast_value.setText(f"{contrast}%")
+        self.contrast_input.setText(str(contrast))
 
-    def apply_vibrance(self):
-        if self.nvidia_control is None or self.vibrance_range is None:
+    def show_vibrance(self):
+        value = self.vibrance_slider.value()
+        self.vibrance_value.setText(self.vibrance_text(value))
+        self.vibrance_input.setText(str(value))
+
+    def queue_gamma_contrast(self, *_):
+        self.show_gamma_contrast()
+        self.gamma_contrast_timer.start(300)
+
+    def queue_vibrance(self, *_):
+        self.show_vibrance()
+        self.vibrance_timer.start(300)
+
+    def gamma_input_changed(self):
+        try:
+            value = round(float(self.gamma_input.text().replace(",", ".")) * 100)
+        except ValueError:
+            value = self.gamma_slider.value()
+        self.gamma_slider.setValue(max(40, min(280, value)))
+        self.show_gamma_contrast()
+
+    def contrast_input_changed(self):
+        try:
+            value = int(self.contrast_input.text())
+        except ValueError:
+            value = self.contrast_slider.value()
+        self.contrast_slider.setValue(max(0, min(100, value)))
+        self.show_gamma_contrast()
+
+    def vibrance_input_changed(self):
+        if not self.vibrance_range:
             return
         try:
-            self.nvidia_control.set_vibrance(self.vibrance_slider.value())
+            value = int(self.vibrance_input.text())
+        except ValueError:
+            value = self.vibrance_slider.value()
+        self.vibrance_slider.setValue(max(self.vibrance_range[0], min(self.vibrance_range[1], value)))
+        self.show_vibrance()
+
+    def push_gamma_contrast(self):
+        control = self.nvidia_control
+        if control is None or not self.gamma_slider.isEnabled() or not control.select(self.current_display):
+            return
+        try:
+            control.set_gamma_contrast(self.gamma_slider.value() / 100, self.contrast_slider.value())
         except display_controls.DisplayError as ex:
-            self.vibrance_slider.setEnabled(False)
+            for widget in (self.gamma_slider, self.gamma_input, self.contrast_slider, self.contrast_input):
+                widget.setEnabled(False)
+            self.display_status.setText(f"NVIDIA gamma or contrast adjustment failed: {ex}")
+            self.logged.emit(f"NVIDIA display adjustment failed: {ex}")
+
+    def push_vibrance(self):
+        control = self.nvidia_control
+        if (control is None or self.vibrance_range is None or not self.vibrance_slider.isEnabled()
+                or not control.select(self.current_display)):
+            return
+        try:
+            control.set_vibrance(self.vibrance_slider.value())
+        except display_controls.DisplayError as ex:
+            for widget in (self.vibrance_slider, self.vibrance_input):
+                widget.setEnabled(False)
             self.display_status.setText(f"NVIDIA digital-vibrance adjustment failed: {ex}")
             self.logged.emit(f"NVIDIA digital-vibrance adjustment failed: {ex}")
 
@@ -1989,7 +2505,6 @@ class Kernel(QWidget):
     def run_row(self, name, fn):
         row = RunRow(name, next(t[2] for t in TASKS if t[3] is fn),
                      lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
-                     lambda _=False, n=name, f=fn: self.run_reverts([(n, f)]),
                      is_active(fn))
         self.action_rows.append((row, fn))
         return row
@@ -2025,6 +2540,7 @@ class Kernel(QWidget):
         page.col.addStretch()
         self.storage_apps = {}
         self.apps_expanded = False
+        self.apps_anim = self.apps_extra = self.apps_more = None
         self.drive_rows = {}
         self.storage_ready.connect(self.show_usage)
         self.scan_finished.connect(lambda: self.rescan_btn.setEnabled(True))
@@ -2156,7 +2672,33 @@ class Kernel(QWidget):
         self.storage_apps[root] = res.get("apps", [])
         self.render_apps()
 
+    def app_row(self, app, top):
+        kind = "Store app" if app["uwp"] else ("Game" if app["game"] else "App")
+        details = [kind] + ([app["publisher"]] if app["publisher"] else []) + (
+            [app["location"]] if app["location"] else [])
+        row = Row(app["name"], " · ".join(details))
+        row.sub.setWordWrap(True)
+        bar = Bar()
+        bar.set_value(app["size"] / top)
+        bar.setFixedWidth(120)
+        sz = QLabel(apps.human(app["size"]))
+        sz.setStyleSheet("font-size: 15px;")
+        sz.setFixedWidth(70)
+        sz.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        u = Button("Uninstall")
+        u.setCursor(Qt.PointingHandCursor)
+        u.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
+        u.clicked.connect(lambda _=False, a=app, b=u: self.uninstall_app(a, b))
+        row.right.addWidget(bar)
+        row.right.addWidget(sz)
+        row.right.addWidget(u)
+        return row
+
     def render_apps(self):
+        if self.apps_anim is not None:
+            self.apps_anim.stop()
+            self.apps_anim = None
+        self.apps_extra = self.apps_more = None
         while self.apps_box.count():
             item = self.apps_box.takeAt(0)
             if item.widget():
@@ -2171,35 +2713,26 @@ class Kernel(QWidget):
             hint.setContentsMargins(16, 0, 16, 0)
             self.apps_box.addWidget(hint)
             return
-        shown = everything if self.apps_expanded else everything[:8]
         top = everything[0]["size"] or 1
-        for app in shown:
-            kind = "Store app" if app["uwp"] else ("Game" if app["game"] else "App")
-            details = [kind] + ([app["publisher"]] if app["publisher"] else []) + (
-                [app["location"]] if app["location"] else [])
-            row = Row(app["name"], " · ".join(details))
-            row.sub.setWordWrap(True)
-            bar = Bar()
-            bar.set_value(app["size"] / top)
-            bar.setFixedWidth(120)
-            sz = QLabel(apps.human(app["size"]))
-            sz.setStyleSheet("font-size: 15px;")
-            sz.setFixedWidth(70)
-            sz.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            u = Button("Uninstall")
-            u.setCursor(Qt.PointingHandCursor)
-            u.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
-            u.clicked.connect(lambda _=False, a=app, b=u: self.uninstall_app(a, b))
-            row.right.addWidget(bar)
-            row.right.addWidget(sz)
-            row.right.addWidget(u)
-            self.apps_box.addWidget(row)
+        for app in everything[:8]:
+            self.apps_box.addWidget(self.app_row(app, top))
         if len(everything) > 8:
-            more = Button("Show fewer" if self.apps_expanded else f"Show all {len(everything)}")
-            more.setFixedWidth(ROW_ACTION_BUTTON_WIDTH + 24)
+            extra = QWidget()
+            lay = QVBoxLayout(extra)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(2)
+            for app in everything[8:]:
+                lay.addWidget(self.app_row(app, top))
+            extra.setVisible(self.apps_expanded)
+            QTimer.singleShot(0, lambda: isValid(extra) and [w.ensurePolished() for w in extra.findChildren(QWidget)])
+            self.apps_extra = extra
+            self.apps_box.addWidget(extra)
+            more = Button("Show less" if self.apps_expanded else "Show more")
+            more.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
             more.clicked.connect(self.toggle_apps)
+            self.apps_more = more
             holder = QHBoxLayout()
-            holder.setContentsMargins(16, 8, 0, 0)
+            holder.setContentsMargins(0, 8, 16, 0)
             holder.addStretch()
             holder.addWidget(more)
             wrap = QWidget()
@@ -2207,8 +2740,35 @@ class Kernel(QWidget):
             self.apps_box.addWidget(wrap)
 
     def toggle_apps(self):
-        self.apps_expanded = not self.apps_expanded
-        self.render_apps()
+        extra = self.apps_extra
+        if extra is None:
+            return
+        self.apps_expanded = expanding = not self.apps_expanded
+        self.apps_more.setText("Show less" if expanding else "Show more")
+        if self.apps_anim is not None:
+            self.apps_anim.stop()
+            self.apps_anim.deleteLater()
+        fx = extra.graphicsEffect()
+        if fx is None:
+            fx = QGraphicsOpacityEffect(extra)
+            fx.setOpacity(1.0 if extra.isVisible() else 0.0)
+            extra.setGraphicsEffect(fx)
+        if expanding:
+            extra.show()
+        anim = QPropertyAnimation(fx, b"opacity", self)
+        anim.setDuration(240 if expanding else 150)
+        anim.setStartValue(fx.opacity())
+        anim.setEndValue(1.0 if expanding else 0.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        def done():
+            self.apps_anim = None
+            if isValid(extra):
+                extra.setGraphicsEffect(None)
+                extra.setVisible(expanding)
+        anim.finished.connect(done)
+        self.apps_anim = anim
+        anim.start()
 
     def show_path(self, path, is_dir):
         if is_dir:
@@ -2355,14 +2915,18 @@ class Kernel(QWidget):
             return
         if result is None:
             status = "Could not check for updates · open Windows Update to check manually"
-        elif result[0] == 0:
-            status = "Windows is up to date"
         else:
-            count, titles = result
-            noun = "update" if count == 1 else "updates"
-            status = f"{count} {noun} available · {titles[0]}" if titles else f"{count} {noun} available"
-            if count > 1:
-                status += f" and {count - 1} more"
+            count, titles, optional = result
+            if count == 0:
+                status = "Windows is up to date"
+            else:
+                noun = "update" if count == 1 else "updates"
+                status = f"{count} {noun} available · {titles[0]}" if titles else f"{count} {noun} available"
+                if count > 1:
+                    status += f" and {count - 1} more"
+            if optional:
+                noun = "optional update" if optional == 1 else "optional updates"
+                status += f"\n{optional} {noun} (e.g. drivers) under Windows Update > Advanced options > Optional updates"
         row.set_value(status)
         row.set_attention(result is not None and result[0] > 0)
 
@@ -2754,17 +3318,12 @@ class Kernel(QWidget):
             self.update_monitor(self.latest_monitor_data)
 
     def sync_nvidia_controls(self, apply=False):
-        self.gamma_contrast_timer.stop()
-        for slider, value in ((self.gamma_slider, self.cfg.nvidia_gamma),
-                              (self.contrast_slider, self.cfg.nvidia_contrast)):
-            slider.blockSignals(True)
-            slider.setValue(value)
-            slider.blockSignals(False)
-        self.gamma_value.setText(f"{self.cfg.nvidia_gamma / 100:.2f}")
-        self.contrast_value.setText(f"{self.cfg.nvidia_contrast}%")
-        if (apply and self.nvidia_control is not None
-                and self.nvidia_control.supports_gamma_contrast):
-            self.apply_gamma_contrast()
+        self.revert_display()
+        self.migrate_legacy_display_cfg()
+        self.display_applied.clear()
+        if apply:
+            self.apply_saved_display_settings()
+        self.load_display(self.current_display)
 
     def set_smooth(self, on):
         SmoothScroller.on = on
@@ -2807,7 +3366,7 @@ class Kernel(QWidget):
     def export_settings(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export settings", "kernel-settings.json", "JSON (*.json)")
         if path:
-            self.save_toggle_states()
+            self.save_applied_states()
             ok = self.cfg.save(path)
             self.logged.emit(f"Settings exported to {path}" if ok else "Export failed.")
 
@@ -2818,50 +3377,55 @@ class Kernel(QWidget):
         if not self.cfg.load(path):
             self.logged.emit("Import failed: not a valid settings file.")
             return
-        self.applied_states = {}
-        self.profile_pending = False
-        for r, key, _, fn in self.rows:
-            actual = is_active(fn)
-            active = self.cfg.applied.get(key, actual)
-            if key in IRREVERSIBLE and actual:
-                active = True
-            self.applied_states[key] = active
-            r.set_active(active, self.cfg.toggles.get(key, False))
-            self.profile_pending |= active != actual
-        for row, fn in self.action_rows:
-            row.set_active(is_active(fn))
+        profile = dict(self.cfg.applied)
+        self.refresh_tweak_rows()
         self.dl_row.sub.setText(self.cfg.download_dir)
         self.smooth_toggle.set_quiet(self.cfg.smooth_scroll)
         self.cpu_temp_combo.setCurrentIndex(self.cpu_temp_combo.findData(self.cfg.cpu_temp_mode))
         self.sync_nvidia_controls(apply=True)
         SmoothScroller.on = self.cfg.smooth_scroll
-        self.update_status()
-        self.save_toggle_states()
+        self.save_applied_states()
         self.cfg.save()
         self.logged.emit(f"Settings imported from {path}")
+        self.apply_profile(profile)
 
-    def save_toggle_states(self):
-        self.cfg.toggles = {key: r.toggle.on for r, key, _, _ in self.rows}
+    def save_applied_states(self):
         self.cfg.applied = dict(self.applied_states)
 
-    def update_status(self):
-        n = sum(r.toggle.on and r.apply.isEnabled() for r, *_ in self.rows)
-        if self.profile_pending:
-            self.status.setText(f"{n} selected; imported profile ready to apply" if n
-                                else "Imported profile ready to apply")
-        else:
-            self.status.setText(f"{n} selected" if n else "Nothing selected")
-        self.btn.setEnabled(bool(n or self.profile_pending))
+    def refresh_tweak_rows(self):
+        for row, key, _, fn in self.rows:
+            active = is_active(fn)
+            self.applied_states[key] = active
+            row.set_active(active)
+        for row, fn in self.action_rows:
+            row.set_active(is_active(fn))
 
-    def on_toggle(self, *_):
-        self.update_status()
-        self.save_toggle_states()
-        if not (self.isMaximized() or self.isFullScreen()):
-            self.cfg.win_size = [self.width(), self.height()]
-        self.cfg.save()
+    def apply_profile(self, profile):
+        """Offer to bring this PC in line with the tweak states stored in an imported settings file."""
+        operations = []
+        for row, key, name, fn in self.rows:
+            target = profile.get(key)
+            if target is None or is_active(fn) == target:
+                continue
+            if not target and key in IRREVERSIBLE:
+                continue
+            operations.append((name, fn, target))
+        if not operations:
+            return
+        text = ("The imported settings change these tweaks:\n"
+                + "\n".join(f"  {'Apply' if target else 'Revert'}: {name}" for name, _, target in operations)
+                + "\n\nSome changes affect Windows system and security settings. Apply them now?")
+        risky = self.irreversible_names(operations)
+        if risky:
+            text = "These changes CANNOT be undone: " + ", ".join(risky) + ".\n\n" + text
+        answer = QMessageBox.question(
+            self, "Apply imported tweaks", text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            self.run_operations(operations)
 
     def closeEvent(self, e):
-        self.save_toggle_states()
+        self.revert_display()  # unapplied previews are dropped so they don't outlive the app
+        self.save_applied_states()
         if not (self.isMaximized() or self.isFullScreen()):
             self.cfg.win_size = [self.width(), self.height()]
         self.cfg.save()
@@ -2897,34 +3461,6 @@ class Kernel(QWidget):
     def irreversible_names(self, operations):
         return [name for name, fn, target in operations if target and fn.__name__ in IRREVERSIBLE]
 
-    def start(self):
-        targets = dict(self.applied_states) if self.profile_pending else {}
-        for row, key, _, _ in self.rows:
-            if row.toggle.on and row.apply.isEnabled():
-                targets[key] = True
-        operations = []
-        for row, key, name, fn in self.rows:
-            target = targets.get(key)
-            if target is None or is_active(fn) == target:
-                continue
-            if not target and key in IRREVERSIBLE:
-                continue
-            operations.append((name, fn, target))
-        if not operations:
-            self.profile_pending = False
-            self.update_status()
-            return
-        text = ("This will apply the selected tweaks and sync imported applied states. "
-                "Some changes affect Windows system and security settings. Continue?")
-        risky = self.irreversible_names(operations)
-        if risky:
-            text = ("These changes CANNOT be undone: " + ", ".join(risky) + ".\n\n" + text)
-        answer = QMessageBox.question(
-            self, "Apply selected changes", text,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer == QMessageBox.Yes:
-            self.run_operations(operations)
-
     def run_tasks(self, sel):
         operations = [(name, fn, True) for name, fn in sel]
         risky = self.irreversible_names(operations)
@@ -2942,7 +3478,6 @@ class Kernel(QWidget):
         if not operations or (self.tweak_job and self.tweak_job.active):
             return
         self.tweak_operation_fns = {fn for _, fn, _ in operations}
-        self.btn.setEnabled(False)
         self.goto(ACTIVITY)
 
         def work(job):
@@ -2969,20 +3504,8 @@ class Kernel(QWidget):
 
     def tweaks_changed(self):
         if self.tweak_job and not self.tweak_job.active:
-            for row, key, _, fn in self.rows:
-                active = is_active(fn)
-                previous = self.applied_states.get(key, False)
-                if fn in self.tweak_operation_fns and active != previous:
-                    self.applied_states[key] = active
-                selected = False if previous and not self.applied_states[key] else None
-                row.set_active(self.applied_states[key], selected)
-            self.profile_pending = any(
-                self.applied_states[key] != is_active(fn)
-                for _, key, _, fn in self.rows)
-            for row, fn in self.action_rows:
-                row.set_active(is_active(fn))
-            self.update_status()
-            self.save_toggle_states()
+            self.refresh_tweak_rows()
+            self.save_applied_states()
             self.cfg.save()
 
 

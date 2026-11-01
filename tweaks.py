@@ -233,25 +233,72 @@ def t_lock_screen_widgets(log):
     log("Widgets disabled on the Windows lock screen.")
 
 
+def _get_all_ultimate_performance_plans():
+    """Extract all Ultimate Performance plan GUIDs from powercfg list."""
+    try:
+        output = run(["powercfg", "/list"])
+    except Exception:
+        return []
+
+    plans = []
+    lines = output.split('\n')
+
+    for i, line in enumerate(lines):
+        # Look for lines containing the plan name in parentheses
+        if '(Ultimate Performance)' in line:
+            # Extract GUID which should be in this line or nearby
+            # Format: "Power Scheme GUID: {GUID}  (Plan Name)"
+            match = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", line, re.IGNORECASE)
+            if match:
+                guid = match.group(1)
+                if guid not in plans:  # Avoid duplicates
+                    plans.append(guid)
+
+    return plans
+
+
 def t_power(log):
+    """Activate Ultimate Performance power plan without creating duplicates."""
+    # First, get list of ALL existing Ultimate Performance plans
+    existing_plans = _get_all_ultimate_performance_plans()
+
+    if existing_plans:
+        # Try each existing plan until one works
+        for plan_guid in existing_plans:
+            result = subprocess.run(["powercfg", "/setactive", plan_guid],
+                                  capture_output=True, text=True, creationflags=NOWIN, shell=False)
+            if result.returncode == 0:
+                log("Ultimate Performance power plan activated.")
+                return
+
+    # No existing plans or all failed - try standard GUID
     ultimate = "e9a42b02-d5df-448d-aa00-03f14749eb61"
-    result = subprocess.run(["powercfg", "/setactive", ultimate], capture_output=True, text=True,
-                            creationflags=NOWIN, shell=False)
+    result = subprocess.run(["powercfg", "/setactive", ultimate],
+                          capture_output=True, text=True, creationflags=NOWIN, shell=False)
     if result.returncode == 0:
         log("Ultimate Performance power plan activated.")
         return
-    log("Ultimate Performance plan is not installed; creating it...")
-    duplicate = subprocess.run(["powercfg", "/duplicatescheme", ultimate],
-                               capture_output=True, text=True, creationflags=NOWIN, shell=False)
-    output = (duplicate.stdout + duplicate.stderr).strip()
-    match = re.search(r"([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})", output)
-    if duplicate.returncode != 0 or not match:
-        raise RuntimeError(f"Could not create Ultimate Performance plan: {output[-300:]}")
-    activated = subprocess.run(["powercfg", "/setactive", match.group(1)],
-                               capture_output=True, text=True, creationflags=NOWIN, shell=False)
-    if activated.returncode != 0:
-        output = (activated.stdout + activated.stderr).strip()
-        raise RuntimeError(f"Could not activate Ultimate Performance plan: {output[-300:]}")
+
+    # If standard GUID doesn't exist, create it
+    log("Ultimate Performance plan not found, creating...")
+    result = subprocess.run(["powercfg", "/duplicatescheme", ultimate],
+                          capture_output=True, text=True, creationflags=NOWIN, shell=False)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Could not create Ultimate Performance plan: {(result.stdout + result.stderr).strip()[-300:]}")
+
+    output = (result.stdout + result.stderr).strip()
+    match = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", output, re.IGNORECASE)
+    if not match:
+        raise RuntimeError(f"Could not extract GUID from duplicated scheme: {output[-300:]}")
+
+    new_guid = match.group(1)
+    result = subprocess.run(["powercfg", "/setactive", new_guid],
+                          capture_output=True, text=True, creationflags=NOWIN, shell=False)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Could not activate new Ultimate Performance plan: {(result.stdout + result.stderr).strip()[-300:]}")
+
     log("Ultimate Performance power plan created and activated.")
 
 
@@ -361,6 +408,68 @@ def t_recall(log):
     log(out[-300:] if out else "DISM returned no output.")
 
 
+SYSTEM_REPAIR_STEPS = (
+    ("DISM CheckHealth", ["DISM", "/Online", "/Cleanup-Image", "/CheckHealth"]),
+    ("DISM RestoreHealth", ["DISM", "/Online", "/Cleanup-Image", "/RestoreHealth"]),
+    ("SFC /scannow", ["sfc", "/scannow"]),
+    ("DISM StartComponentCleanup", ["DISM", "/Online", "/Cleanup-Image", "/StartComponentCleanup"]),
+)
+ERROR_SUCCESS_REBOOT_REQUIRED = 3010
+
+
+def _run_tool(cmd):
+    """Run a console tool; returns (exit code, text). SFC writes UTF-16, DISM the OEM code page."""
+    r = subprocess.run(cmd, capture_output=True, creationflags=NOWIN, shell=False)
+    raw = r.stdout + r.stderr
+    text = raw.decode("utf-16-le", "replace") if b"\x00" in raw else raw.decode("oem", "replace")
+    return r.returncode, text.replace("\x00", "").replace("\r", "\n")
+
+
+def _tool_result_lines(text):
+    """The meaningful lines of DISM/SFC output, without banners and progress bars."""
+    skip = ("deployment image servicing", "version:", "image version:", "beginning system scan",
+            "beginning verification")
+    lines = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s and "%" not in s and not s.startswith(("[", "=")) and not s.lower().startswith(skip):
+            lines.append(s)
+    return lines
+
+
+def t_system_repair(log):
+    total = len(SYSTEM_REPAIR_STEPS)
+    results = []
+    restart_needed = False
+    for number, (label, cmd) in enumerate(SYSTEM_REPAIR_STEPS, 1):
+        if restart_needed:
+            results.append((label, "SKIPPED (restart first)"))
+            continue
+        log(f"[{number}/{total}] {label}: running (this can take several minutes)...")
+        code, text = _run_tool(cmd)
+        low = text.lower()
+        if code == ERROR_SUCCESS_REBOOT_REQUIRED or re.search(r"restart|reboot", low):
+            state, restart_needed = "RESTART REQUIRED", True
+        elif "repairable" in low or "unable to fix" in low:
+            state = "WARNING"
+        elif code != 0:
+            state = "FAILED"
+        else:
+            state = "OK"
+        log(f"[{number}/{total}] {label}: {state}")
+        lines = _tool_result_lines(text)
+        for line in lines[-3:] or ([f"Exit code {code}."] if state == "FAILED" else []):
+            log(f"    {line}")
+        results.append((label, state))
+    log("== Results")
+    for label, state in results:
+        log(f"  {label}: {state}")
+    if restart_needed:
+        log("A repair needs a restart to finish. Restart Windows before running any more "
+            "maintenance operations; the remaining steps were skipped.")
+    log("Restart Windows now to finish applying repairs and cleanup.")
+
+
 def t_game_mode(log):
     gb = r"Software\Microsoft\GameBar"
     set_reg(HKCU, gb, "AutoGameModeEnabled", 1)
@@ -389,7 +498,9 @@ def _all_reg(root, path, names, expected):
 
 
 def _active_power():
-    return "e9a42b02-d5df-448d-aa00-03f14749eb61" in run(["powercfg", "/getactivescheme"]).lower()
+    active_scheme = run(["powercfg", "/getactivescheme"]).lower()
+    # Check for standard GUID or any Ultimate Performance plan name
+    return "e9a42b02-d5df-448d-aa00-03f14749eb61" in active_scheme or "ultimate performance" in active_scheme
 
 
 def _active_group_policy():
@@ -508,9 +619,17 @@ def revert_tweak(fn, log):
     elif name == "t_telemetry":
         set_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Windows\DataCollection", "AllowTelemetry", 1)
     elif name == "t_power":
-        out = run(["powercfg", "/setactive", "SCHEME_BALANCED"])
+        # Switch to High Performance first
+        out = run(["powercfg", "/setactive", "SCHEME_HIGH_PERFORMANCE"])
         if out and "error" in out.lower():
-            raise RuntimeError(out[-300:])
+            log(f"Warning switching to High Performance: {out[-100:]}")
+
+        # Delete ALL Ultimate Performance plans
+        plans = _get_all_ultimate_performance_plans()
+        for plan in plans:
+            run(["powercfg", "/delete", plan])
+
+        log("Switched to High Performance and deleted all Ultimate Performance plans.")
     elif name == "t_widgets":
         _set_widgets_toggle(True, log)
     elif name == "t_lock_screen_widgets":
@@ -531,6 +650,8 @@ def revert_tweak(fn, log):
         set_reg(HKCU, r"Control Panel\Cursors", "Scheme Source", 2)
         ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 3)
     elif name == "t_notepad":
+        if _notepad_running():
+            raise RuntimeError("Notepad is open. Close Notepad completely, then revert this tweak again.")
         if not _notepad_restore():
             log("No saved Notepad settings backup; Notepad will recreate its defaults.")
         _delete_reg(HKLM, r"SOFTWARE\Policies\WindowsNotepad", "DisableAIFeatures")  # left by older versions
@@ -752,16 +873,22 @@ def _active_notepad():
     return _notepad_state[0]
 
 
+def _notepad_running():
+    return "notepad.exe" in run(["tasklist", "/FI", "IMAGENAME eq Notepad.exe", "/NH"]).lower()
+
+
 def t_notepad(log):
     pkg = os.path.join(os.path.expandvars(NOTEPAD_SETTINGS_DIR), "settings.dat")
     if not os.path.isfile(pkg):
         raise RuntimeError("Notepad settings not found. Open Notepad once, then try again.")
-    run(["taskkill", "/f", "/im", "notepad.exe"])
+    if _notepad_running():
+        raise RuntimeError("Notepad is open. Close Notepad completely, then apply this tweak again.")
     _notepad_backup()
     try:
         _write_notepad_font(pkg)
         if not _active_notepad():
-            raise RuntimeError("Notepad font settings did not save correctly.")
+            raise RuntimeError("Notepad font settings did not save correctly. "
+                               "Make sure Notepad is fully closed, then try again.")
         log("Notepad font set to Consolas, Regular, 14.")
     except Exception:
         _notepad_restore()
@@ -906,7 +1033,7 @@ def _revert_nvidia_profile(log):
 
 
 # Run-once actions shown as buttons instead of toggles
-ONE_SHOT = {"t_temp"}
+ONE_SHOT = {"t_temp", "t_system_repair"}
 
 # Tweaks with no way back; the UI warns before applying and disables Revert
 IRREVERSIBLE = {"t_onedrive", "t_remove_apps"}
@@ -916,7 +1043,7 @@ TASKS = [
     ("Privacy", "Remove Bing from search", "Removes Bing results when searching for items on your PC via start menu and search", t_bing),
     ("Privacy", "Disable ads & suggestions", "Tips, suggested apps and advertising ID", t_ads),
     ("Privacy", "Minimize telemetry", "Reduce diagnostic data collection", t_telemetry),
-    ("Storage", "Clean temp files", "Temp, Prefetch and Recycle Bin", t_temp),
+    ("Storage", "System Cleanup", "Removes temporary system files, clears Windows prefetch data, and empties the Recycle Bin to free up disk space.", t_temp),
     ("System", "Enable Group Policy Editor", "Installs pro version of gpeditor on to your system", t_group_policy),
     ("Performance", "Ultimate performance", "Activate the maximum performance power plan", t_power),
     ("Appearance", "Hide Widgets & Chat", "Remove the taskbar buttons", t_widgets),
@@ -932,12 +1059,13 @@ TASKS = [
     ("Input", "Disable Sticky Keys", "Stops the popup when Shift is pressed five times", t_sticky_keys),
     ("Performance", "Enable Game Mode", "Prioritizes games and limits background activity", t_game_mode),
     ("Performance", "Hardware-accelerated GPU scheduling", "Let the GPU manage its own memory, lowering CPU overhead (restart required)", t_hags),
-    ("Security", "Disable Smart App Control", "Stops blocking unsigned or unknown apps (permanent until Windows reset)", t_smart_app_control),
-    ("Security", "Disable Core isolation", "Turn off Memory integrity (HVCI) for better performance", t_core_isolation),
+    ("Security", "Disable Smart App Control", "Disables Smart App Control to prevent it from blocking untrusted, unsigned, or unknown applications, reduces Windows application security.", t_smart_app_control),
+    ("Performance", "Disable Core isolation", "Disables Memory Integrity (HVCI) to improve performance and resolve compatibility issues with applications that don't support it. Note: This reduces a Windows security protection.", t_core_isolation),
     ("Privacy", "Disable Nearby sharing", "Stops sharing with nearby PCs", t_nearby),
-    ("Privacy", "Disable Recall", "Disables Windows 11 AI-powered feature that acts like a photographic memory for your computer", t_recall),
+    ("Performance", "Disable Windows Recall (Hidden from users)", "Disables Windows 11 AI-powered feature that acts like a photographic memory for your computer", t_recall),
     ("Apps", "Remove OneDrive", "Completely uninstalls OneDrive, deletes its leftovers and blocks it from coming back. WARNING: this cannot be reverted.", t_onedrive),
     ("Apps", "Remove useless Windows apps", f"Uninstalls: {BLOAT_NAMES}. WARNING: this cannot be reverted.", t_remove_apps),
     ("Appearance", "Force dark mode", "Turns on dark mode through the registry, even on Windows that isn't activated", t_dark_mode),
     ("Performance", "Disable Xbox Game Bar", "Disables Xbox Game Bar Overlay, Xbox accessibility control hints and Xbox capture", t_xbox),
+    ("Performance", "System file repair & maintenance", "Automatically checks, repairs, and maintains Windows system files and components to help resolve corruption, improve system integrity, and remove unnecessary old component files.", t_system_repair),
 ]

@@ -27,9 +27,18 @@ $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
 UPDATE_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $result = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().Search("IsInstalled=0 and IsHidden=0")
+$required = @()
+$optional = 0
+foreach ($u in $result.Updates) {
+  $cats = @($u.Categories | ForEach-Object { $_.Name })
+  if ($cats -contains 'Definition Updates') { continue }
+  if ($u.Type -eq 2 -or (-not $u.AutoSelectOnWebSites -and $cats -notcontains 'Upgrades')) { $optional++; continue }
+  $required += $u.Title
+}
 [pscustomobject]@{
-  count = $result.Updates.Count
-  titles = @($result.Updates | ForEach-Object { $_.Title })
+  count = $required.Count
+  titles = @($required)
+  optional = $optional
 } | ConvertTo-Json -Compress
 """
 
@@ -131,11 +140,16 @@ def collect():
 
 
 def check_updates():
-    """Return (count, titles) of pending Windows updates, or None if the check failed."""
+    """Return (required count, required titles, optional count) like the Settings page, or None if the check failed.
+
+    Settings only lists required updates on its main page; drivers and other optional updates sit under
+    Advanced options > Optional updates, and Defender definition updates are never listed.
+    """
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", UPDATE_SCRIPT],
                            capture_output=True, text=True, creationflags=NOWIN, timeout=180)
         data = json.loads(r.stdout)
-        return int(data.get("count") or 0), [_clean(t) for t in _list(data.get("titles"))]
+        return (int(data.get("count") or 0), [_clean(t) for t in _list(data.get("titles"))],
+                int(data.get("optional") or 0))
     except Exception:
         return None
