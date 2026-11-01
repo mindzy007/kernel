@@ -1712,7 +1712,7 @@ class Kernel(QWidget):
         self.tweak_job = None
 
         self.setObjectName("window")
-        self.setWindowTitle("kernel")
+        self.setWindowTitle("Kernel")
         avail = QApplication.primaryScreen().availableGeometry()
         self.resize(min(1180, avail.width() - 80), min(820, avail.height() - 80))
         if self.cfg.win_size:
@@ -1729,7 +1729,7 @@ class Kernel(QWidget):
         sl = QVBoxLayout(side)
         sl.setContentsMargins(14, 24, 14, 14)
         sl.setSpacing(4)
-        logo = QLabel("kernel")
+        logo = QLabel("Kernel")
         logo.setObjectName("h1")
         sl.addWidget(logo)
         sl.addSpacing(20)
