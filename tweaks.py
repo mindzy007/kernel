@@ -131,8 +131,16 @@ BLOAT_APPS = [
     ("Maps", "Microsoft.WindowsMaps"),
     ("Power Automate", "Microsoft.PowerAutomateDesktop"),
     ("Cortana", "Microsoft.549981C3F5F10"),
+    ("Microsoft Bing", "Microsoft.BingSearch"),
+    ("Microsoft Bing", "Microsoft.Bing"),
+    ("Microsoft To Do", "Microsoft.Todos"),
+    ("Outlook", "Microsoft.OutlookForWindows"),
+    ("Microsoft Teams", "MSTeams"),
+    ("Microsoft Teams", "MicrosoftTeams"),
+    ("Copilot", "Microsoft.Copilot"),
+    ("Copilot", "Microsoft.Windows.Ai.Copilot.Provider"),
 ]
-BLOAT_NAMES = ", ".join(n for n, _ in BLOAT_APPS)
+BLOAT_NAMES = ", ".join(dict.fromkeys(n for n, _ in BLOAT_APPS))
 APPX_STORE = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications"
 
 
@@ -148,14 +156,40 @@ def _installed_appx():
 
 
 def t_remove_apps(log):
+    last = None
     for display, pkg in BLOAT_APPS:
-        log(f"Removing {display}...")
+        if display != last:
+            log(f"Removing {display}...")
+            last = display
         script = (f"Get-AppxPackage -AllUsers -Name '{pkg}' | Remove-AppxPackage -AllUsers "
                   f"-ErrorAction SilentlyContinue; "
                   f"Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq '{pkg}' | "
                   f"Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue")
         run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script])
     log("Selected apps removed. This cannot be undone.")
+
+
+START_STATE_DIR = os.path.expandvars(
+    r"%LOCALAPPDATA%\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState")
+
+
+def t_clear_start(log):
+    import sys
+    import time
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    template = os.path.join(base, "assets", "start2.bin")
+    if sys.getwindowsversion().build < 22621 or not os.path.isdir(START_STATE_DIR):
+        raise RuntimeError("Clearing Start pins needs Windows 11 22H2 or newer.")
+    if not os.path.isfile(template):
+        raise RuntimeError("assets\\start2.bin is missing from the app files.")
+    target = os.path.join(START_STATE_DIR, "start2.bin")
+    if os.path.isfile(target) and not os.path.isfile(target + ".bak"):
+        shutil.copy2(target, target + ".bak")  # keeps the original layout so it can be restored by hand
+    run(["taskkill", "/F", "/IM", "StartMenuExperienceHost.exe"])
+    time.sleep(1)
+    shutil.copyfile(template, target)
+    run(["taskkill", "/F", "/IM", "StartMenuExperienceHost.exe"])
+    log("All pinned Start shortcuts removed. Open Start to see the empty layout.")
 
 
 def _clean_dir(path, log):
@@ -708,7 +742,7 @@ def revert_tweak(fn, log):
         subprocess.Popen(["explorer.exe"], creationflags=NOWIN)
     elif name == "t_xbox":
         _xbox_values(True)
-    elif name in IRREVERSIBLE or name == "t_temp":
+    elif name in IRREVERSIBLE or name in ("t_temp", "t_clear_start"):
         raise RuntimeError("This action does not have a safe automatic Windows default to restore.")
     else:
         raise RuntimeError(f"No revert handler is defined for {name}.")
@@ -1036,7 +1070,7 @@ def _revert_nvidia_profile(log):
 ONE_SHOT = {"t_temp", "t_system_repair"}
 
 # Tweaks with no way back; the UI warns before applying and disables Revert
-IRREVERSIBLE = {"t_onedrive", "t_remove_apps"}
+IRREVERSIBLE = {"t_onedrive", "t_remove_apps", "t_clear_start"}
 
 # (section, title, description, function)
 TASKS = [
@@ -1063,8 +1097,9 @@ TASKS = [
     ("Performance", "Disable Core isolation", "Disables Memory Integrity (HVCI) to improve performance and resolve compatibility issues with applications that don't support it. Note: This reduces a Windows security protection.", t_core_isolation),
     ("Privacy", "Disable Nearby sharing", "Stops sharing with nearby PCs", t_nearby),
     ("Performance", "Disable Windows Recall (Hidden from users)", "Disables Windows 11 AI-powered feature that acts like a photographic memory for your computer", t_recall),
-    ("Apps", "Remove OneDrive", "Completely uninstalls OneDrive, deletes its leftovers and blocks it from coming back. WARNING: this cannot be reverted.", t_onedrive),
-    ("Apps", "Remove useless Windows apps", f"Uninstalls: {BLOAT_NAMES}. WARNING: this cannot be reverted.", t_remove_apps),
+    ("Apps", "Remove OneDrive", "Completely uninstalls OneDrive, deletes its leftovers and blocks it from coming back. This cannot be reverted.", t_onedrive),
+    ("Apps", "Remove useless Windows apps", f"Uninstalls: {BLOAT_NAMES}. This cannot be reverted.", t_remove_apps),
+    ("System", "Clear Start Menu pins", "Removes every pinned shortcut from the Start Menu, requires Windows 11 22H2 or newer. This cannot be reverted.", t_clear_start),
     ("Appearance", "Force dark mode", "Turns on dark mode through the registry, even on Windows that isn't activated", t_dark_mode),
     ("Performance", "Disable Xbox Game Bar", "Disables Xbox Game Bar Overlay, Xbox accessibility control hints and Xbox capture", t_xbox),
     ("Performance", "System file repair & maintenance", "Automatically checks, repairs, and maintains Windows system files and components to help resolve corruption, improve system integrity, and remove unnecessary old component files.", t_system_repair),

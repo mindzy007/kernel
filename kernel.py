@@ -31,6 +31,7 @@ import apps
 import display_controls
 import specs
 import storage
+from version import VERSION, UPDATE_REPO
 from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
@@ -878,6 +879,14 @@ class SpecRow(HoverFrame):
         QTimer.singleShot(1200, restore)
 
 
+def version_tuple(v):
+    parts = []
+    for p in str(v).lstrip("vV").split("."):
+        digits = "".join(ch for ch in p if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
 class Row(HoverFrame):
     def __init__(self, title, subtitle="", icon=None, right_margin=16):
         super().__init__()
@@ -1688,6 +1697,7 @@ class Kernel(QWidget):
     monitor_sample = Signal(dict)
     monitor_error = Signal(str)
     monitor_finished = Signal(int, str)
+    update_checked = Signal(int, str, str, str)
 
     def __init__(self):
         super().__init__()
@@ -3301,15 +3311,199 @@ class Kernel(QWidget):
             b.clicked.connect(fn)
             self.dl_row.right.addWidget(b)
         page.add(self.dl_row)
-        page.section("Profile")
-        prof = Row("Settings file", "Applied tweak states and download location are saved automatically")
-        for text, fn in (("Export", self.export_settings), ("Import", self.import_settings)):
-            b = Button(text)
-            b.clicked.connect(fn)
-            prof.right.addWidget(b)
-        page.add(prof)
+        page.section("About")
+        self.update_url = self.update_tag = self.update_file = ""
+        self.update_job = None
+        self.update_serial, self.update_pending = 0, False
+        self.about_row = Row("Kernel", f"Version {VERSION}")
+        self.update_download = Button("Download")
+        self.update_download.clicked.connect(self.on_update_download_clicked)
+        self.update_download.hide()
+        self.update_button = Button("Check for updates")
+        self.update_button.clicked.connect(self.check_for_updates)
+        self.about_row.right.addWidget(self.update_download)
+        self.about_row.right.addWidget(self.update_button)
+        self.update_checked.connect(self.show_update_result)
+        page.add(self.about_row)
         page.col.addStretch()
         return page
+
+    def check_for_updates(self):
+        if self.update_pending:
+            return
+        self.update_serial += 1
+        serial = self.update_serial
+        self.update_pending = True
+        self.update_button.setEnabled(False)
+        self.update_download.hide()
+        self.set_update_status("Checking...")
+        try:
+            threading.Thread(target=self.fetch_latest_release, args=(serial,), daemon=True).start()
+        except Exception:
+            self.update_timed_out(serial)
+            return
+        QTimer.singleShot(25000, lambda: self.update_timed_out(serial))
+
+    UPDATE_HEADERS = {"User-Agent": "Kernel-Updater", "Cache-Control": "no-cache", "Pragma": "no-cache"}
+
+    def latest_from_redirect(self):
+        # github.com/<repo>/releases/latest redirects to the newest tag; no API rate limit
+        import urllib.request
+        from urllib.parse import unquote
+        req = urllib.request.Request(
+            f"https://github.com/{UPDATE_REPO}/releases/latest?nocache={int(time.time())}",
+            method="HEAD", headers=self.UPDATE_HEADERS)
+        with apps._open(req, 5) as r:
+            final = r.geturl()
+        if "/releases/tag/" not in final:
+            raise LookupError("none")  # the repo answered, but has no published release
+        return unquote(final.rsplit("/releases/tag/", 1)[1].split("?")[0])
+
+    def latest_from_api(self):
+        # newest tag across ALL published releases, so a stale "Latest" badge can't hide a newer one
+        import urllib.request
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{UPDATE_REPO}/releases?per_page=30",
+            headers={**self.UPDATE_HEADERS, "Accept": "application/vnd.github+json"})
+        with apps._open(req, 5) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        tags = [str(x.get("tag_name", "")) for x in data if not x.get("draft") and not x.get("prerelease")]
+        tags = [t for t in tags if t]
+        if not tags:
+            raise LookupError("none")
+        return max(tags, key=version_tuple)
+
+    def fetch_latest_release(self, serial):
+        tags, error, none = [], "", False
+        for _ in range(2):  # retry once; networks time out now and then
+            for method in (self.latest_from_redirect, self.latest_from_api):
+                try:
+                    tags.append(method())
+                except LookupError:
+                    none = True
+                except Exception as ex:
+                    error = str(ex) or "failed"
+            if tags:
+                break
+        if tags:
+            tag = max(tags, key=version_tuple)  # newest answer wins
+            self.update_checked.emit(serial, tag, f"https://github.com/{UPDATE_REPO}/releases/tag/{tag}", "")
+        else:
+            self.update_checked.emit(serial, "", "", "none" if none and not error else (error or "failed"))
+
+    def on_update_download_clicked(self):
+        if self.update_file and os.path.isfile(self.update_file):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(self.update_file)])
+            return
+        self.download_update()
+
+    def resolve_update_asset(self, tag):
+        """(url, file name, size) of the installer attached to a release."""
+        import urllib.request
+        from urllib.parse import quote
+        name = f"Kernel-Setup-{tag.lstrip('vV')}.exe"
+        guess = (f"https://github.com/{UPDATE_REPO}/releases/download/{quote(tag)}/{name}", name, 0)
+        try:
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{UPDATE_REPO}/releases/tags/{quote(tag)}",
+                headers={**self.UPDATE_HEADERS, "Accept": "application/vnd.github+json"})
+            with apps._open(req, 8) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            for a in data.get("assets", []):
+                n = os.path.basename(str(a.get("name", "")))
+                if n.lower().endswith(".exe") and a.get("browser_download_url"):
+                    return a["browser_download_url"], n, int(a.get("size") or 0)
+        except Exception:
+            pass
+        return guess
+
+    def download_update(self):
+        tag = self.update_tag
+        if not tag:
+            return
+
+        def work(job):
+            import urllib.request
+            url, name, total = self.resolve_update_asset(tag)
+            folder = self.cfg.download_dir
+            os.makedirs(folder, exist_ok=True)
+            dest = os.path.join(folder, name)
+            part = dest + ".part"
+            req = urllib.request.Request(url, headers={"User-Agent": "Kernel-Updater"})
+            got = 0
+            with apps._open(req, 30) as r, open(part, "wb") as f:
+                total = int(r.headers.get("Content-Length") or total or 0)
+                while not job.cancelled:
+                    chunk = r.read(262144)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    if total:
+                        job.update(progress=got / total, message=f"{apps.human(got)} / {apps.human(total)}")
+            if job.cancelled or (total and got < total):
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                return False
+            os.replace(part, dest)
+            job.update(path=dest, size=got)
+            self.logged.emit(f"Update downloaded to {dest}")
+            return True
+
+        job = Job(f"Kernel {tag.lstrip('vV')} update", "download", fn=work)
+        job.done_msg = "Downloaded"
+        self.update_job = job
+        job.changed.connect(self.on_update_job_changed)  # bound method: runs on the UI thread
+        self.update_download.setEnabled(False)
+        self.set_update_status("Downloading update...", "#ffb454")
+        self.jobs.submit(job, parallel=True)
+
+    def on_update_job_changed(self):
+        self.show_update_download(self.update_job)
+
+    def show_update_download(self, job):
+        if job.state in ("queued", "running"):
+            pct = f" {int(job.progress * 100)}%" if job.progress >= 0 else "..."
+            self.set_update_status(f"Downloading update{pct}", "#ffb454")
+        elif job.state == "done":
+            self.update_file = job.path
+            self.update_download.setText("Show file")
+            self.update_download.setEnabled(True)
+            self.set_update_status(f"Update downloaded: {os.path.basename(job.path)}", "#4fd08a")
+        else:
+            self.update_download.setText("Download")
+            self.update_download.setEnabled(True)
+            self.set_update_status("Download failed, try again", "#ffb454")
+
+    def set_update_status(self, text, color=""):
+        self.about_row.sub.setStyleSheet(f"color: {color};" if color else "")
+        self.about_row.sub.setText(f"Version {VERSION}  \u00b7  {text}")
+
+    def update_timed_out(self, serial):
+        if serial == self.update_serial and self.update_pending:
+            self.update_pending = False
+            self.update_button.setEnabled(True)
+            self.set_update_status("Couldn't reach the update server, try again")
+
+    def show_update_result(self, serial, tag, url, error):
+        if serial != self.update_serial or not self.update_pending:
+            return
+        self.update_pending = False
+        self.update_button.setEnabled(True)
+        if error == "none":
+            self.set_update_status("No release published yet")
+        elif error or not tag:
+            self.set_update_status("Couldn't reach the update server, try again")
+        elif version_tuple(tag) > version_tuple(VERSION):
+            self.update_url, self.update_tag, self.update_file = url, tag, ""
+            self.update_download.setText("Download")
+            self.update_download.setEnabled(True)
+            self.set_update_status(f"Update available: {tag.lstrip('vV')}", "#ffb454")
+            self.update_download.show()
+        else:
+            self.set_update_status("Up to date", "#4fd08a")
 
     def set_cpu_temp_mode(self):
         self.cfg.cpu_temp_mode = self.cpu_temp_combo.currentData()
@@ -3363,32 +3557,6 @@ class Kernel(QWidget):
         os.makedirs(self.cfg.download_dir, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(self.cfg.download_dir))
 
-    def export_settings(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export settings", "kernel-settings.json", "JSON (*.json)")
-        if path:
-            self.save_applied_states()
-            ok = self.cfg.save(path)
-            self.logged.emit(f"Settings exported to {path}" if ok else "Export failed.")
-
-    def import_settings(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import settings", "", "JSON (*.json)")
-        if not path:
-            return
-        if not self.cfg.load(path):
-            self.logged.emit("Import failed: not a valid settings file.")
-            return
-        profile = dict(self.cfg.applied)
-        self.refresh_tweak_rows()
-        self.dl_row.sub.setText(self.cfg.download_dir)
-        self.smooth_toggle.set_quiet(self.cfg.smooth_scroll)
-        self.cpu_temp_combo.setCurrentIndex(self.cpu_temp_combo.findData(self.cfg.cpu_temp_mode))
-        self.sync_nvidia_controls(apply=True)
-        SmoothScroller.on = self.cfg.smooth_scroll
-        self.save_applied_states()
-        self.cfg.save()
-        self.logged.emit(f"Settings imported from {path}")
-        self.apply_profile(profile)
-
     def save_applied_states(self):
         self.cfg.applied = dict(self.applied_states)
 
@@ -3399,29 +3567,6 @@ class Kernel(QWidget):
             row.set_active(active)
         for row, fn in self.action_rows:
             row.set_active(is_active(fn))
-
-    def apply_profile(self, profile):
-        """Offer to bring this PC in line with the tweak states stored in an imported settings file."""
-        operations = []
-        for row, key, name, fn in self.rows:
-            target = profile.get(key)
-            if target is None or is_active(fn) == target:
-                continue
-            if not target and key in IRREVERSIBLE:
-                continue
-            operations.append((name, fn, target))
-        if not operations:
-            return
-        text = ("The imported settings change these tweaks:\n"
-                + "\n".join(f"  {'Apply' if target else 'Revert'}: {name}" for name, _, target in operations)
-                + "\n\nSome changes affect Windows system and security settings. Apply them now?")
-        risky = self.irreversible_names(operations)
-        if risky:
-            text = "These changes CANNOT be undone: " + ", ".join(risky) + ".\n\n" + text
-        answer = QMessageBox.question(
-            self, "Apply imported tweaks", text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer == QMessageBox.Yes:
-            self.run_operations(operations)
 
     def closeEvent(self, e):
         self.revert_display()  # unapplied previews are dropped so they don't outlive the app

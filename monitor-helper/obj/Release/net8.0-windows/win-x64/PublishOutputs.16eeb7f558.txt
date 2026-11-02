@@ -1,0 +1,2 @@
+C:\Users\alex\Documents\GitHub\kernel\monitor-helper\out\kernel-monitor.pdb
+C:\Users\alex\Documents\GitHub\kernel\monitor-helper\out\kernel-monitor.exe
