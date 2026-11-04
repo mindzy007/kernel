@@ -887,8 +887,9 @@ def version_tuple(v):
     return tuple(parts)
 
 
-# Fixed text column width so every page wraps row descriptions identically and leaves room for the buttons.
-ROW_TEXT_MAX_WIDTH = 640
+# Fixed gap between a row's text and its buttons; the text column takes whatever width is left,
+# so the gap stays the same at every window size.
+ROW_TEXT_GAP = 48
 
 
 class Row(HoverFrame):
@@ -901,9 +902,8 @@ class Row(HoverFrame):
         if icon:
             lay.addWidget(icon)
         text_box = QWidget()
-        text_box.setMaximumWidth(ROW_TEXT_MAX_WIDTH)
         text = QVBoxLayout(text_box)
-        text.setContentsMargins(0, 0, 0, 0)
+        text.setContentsMargins(0, 0, ROW_TEXT_GAP, 0)
         text.setSpacing(2)
         self.title = title
         t = QLabel(title)
