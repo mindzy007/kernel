@@ -19,7 +19,7 @@ from PySide6.QtGui import (
     QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
 )
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsEffect,
+    QAbstractButton, QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsEffect,
     QGraphicsOpacityEffect,
     QComboBox, QGridLayout, QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
     QPlainTextEdit, QPushButton, QScrollArea, QSlider, QStackedWidget, QStyle, QStyledItemDelegate, QSizePolicy,
@@ -1218,7 +1218,7 @@ class ApplicationsHost(QWidget):
 
 
 class ClearButton(QAbstractButton):
-    """Small round X that wipes a search field; the glyph brightens on hover."""
+    """Small X that wipes a search field; the glyph brightens on hover."""
     SIZE = 28
 
     def __init__(self, parent):
@@ -1259,10 +1259,6 @@ class ClearButton(QAbstractButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         c = QRectF(self.rect()).center()
-        if self._hover > 0.001:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, round(22 * self._hover)))
-            p.drawEllipse(c, self.SIZE / 2 - 1, self.SIZE / 2 - 1)
         v = round(lerp(120, 235, self._hover))
         p.setPen(QPen(QColor(v, v, v), 1.6, Qt.SolidLine, Qt.RoundCap))
         d = 4.5
