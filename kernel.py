@@ -1,4 +1,4 @@
-"""kernel - Windows 11 debloat & optimize tool. Build with build.bat."""
+"""kernel - Windows 11 debloat & optimize tool. Build with build-installer.bat or build-portable.bat."""
 import ctypes
 import html
 import json
@@ -197,7 +197,7 @@ def draw_spotlight(p, path, rect, center, strength, radius, alpha):
     p.restore()
 
 
-BUTTON_GLOW, DROPDOWN_GLOW = 36, 26  # peak glow alpha; the dropdown stays a step dimmer than buttons
+BUTTON_GLOW, DROPDOWN_GLOW = 28, 20  # peak glow alpha; the dropdown stays a step dimmer than buttons
 
 
 class AnimButton(QPushButton):
@@ -439,7 +439,7 @@ class Button(AnimButton):
             if on and not lit:
                 inner = QPainterPath()  # inside the 1px border, so the stroke itself never changes
                 inner.addRoundedRect(r.adjusted(1, 1, -1, -1), k["r"] - 1, k["r"] - 1)
-                self.spotlight(p, inner, 58, BUTTON_GLOW)
+                self.spotlight(p, inner, 70, BUTTON_GLOW)
             edge = QPainterPath()
             edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), k["r"], k["r"])
             p.setPen(QPen(QColor(255, 255, 255, 22), 1))
@@ -887,6 +887,10 @@ def version_tuple(v):
     return tuple(parts)
 
 
+# Fixed text column width so every page wraps row descriptions identically and leaves room for the buttons.
+ROW_TEXT_MAX_WIDTH = 640
+
+
 class Row(HoverFrame):
     def __init__(self, title, subtitle="", icon=None, right_margin=16):
         super().__init__()
@@ -896,19 +900,24 @@ class Row(HoverFrame):
         lay.setSpacing(14)
         if icon:
             lay.addWidget(icon)
-        text = QVBoxLayout()
+        text_box = QWidget()
+        text_box.setMaximumWidth(ROW_TEXT_MAX_WIDTH)
+        text = QVBoxLayout(text_box)
+        text.setContentsMargins(0, 0, 0, 0)
         text.setSpacing(2)
         self.title = title
         t = QLabel(title)
         t.setStyleSheet("font-size: 17px;")
+        t.setWordWrap(True)
         self.sub = QLabel(subtitle)
         self.sub.setObjectName("muted")
+        self.sub.setWordWrap(True)
         if not subtitle:
             self.sub.hide()
         text.addWidget(t)
         text.addWidget(self.sub)
         self.text_col = text
-        lay.addLayout(text, 1)
+        lay.addWidget(text_box, 1)
         self.right = QHBoxLayout()
         self.right.setSpacing(8)
         self.right.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -1208,9 +1217,63 @@ class ApplicationsHost(QWidget):
         self.dock.place()
 
 
+class ClearButton(QAbstractButton):
+    """Small round X that wipes a search field; the glyph brightens on hover."""
+    SIZE = 28
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setToolTip("Clear")
+        self._hover = 0.0
+        self.anim = QPropertyAnimation(self, b"hover", self)
+        self.anim.setEasingCurve(QEasingCurve.InOutSine)
+
+    def get_hover(self):
+        return self._hover
+
+    def set_hover(self, v):
+        self._hover = v
+        self.update()
+
+    hover = Property(float, get_hover, set_hover)
+
+    def glide(self, end, ms):
+        self.anim.stop()
+        self.anim.setDuration(ms)
+        self.anim.setStartValue(self._hover)
+        self.anim.setEndValue(end)
+        self.anim.start()
+
+    def enterEvent(self, e):
+        self.glide(1.0, 160)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.glide(0.0, 220)
+        super().leaveEvent(e)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        c = QRectF(self.rect()).center()
+        if self._hover > 0.001:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, round(22 * self._hover)))
+            p.drawEllipse(c, self.SIZE / 2 - 1, self.SIZE / 2 - 1)
+        v = round(lerp(120, 235, self._hover))
+        p.setPen(QPen(QColor(v, v, v), 1.6, Qt.SolidLine, Qt.RoundCap))
+        d = 4.5
+        p.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
+        p.drawLine(QPointF(c.x() - d, c.y() + d), QPointF(c.x() + d, c.y() - d))
+
+
 class SearchDock(QWidget):
     """Search field pinned over the bottom of a scrolling page, frosted over whatever scrolls behind it."""
     H, GAP = 60, 22
+    MAX_GROW = 12  # px of extra width when focused; must stay under twice the side margin (20)
 
     def __init__(self, page, edit):
         super().__init__(page.parentWidget())
@@ -1227,8 +1290,12 @@ class SearchDock(QWidget):
             QEasingCurve.fromCubicBezier(QPointF(0.22, 0.1), QPointF(0.25, 1.0)))
         edit.setParent(self)
         edit.setFrame(False)
-        edit.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0 22px; "
+        edit.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0 54px 0 22px; "
                            "font-size: 18px; selection-background-color: #444444; }")
+        self.clear_btn = ClearButton(self)
+        self.clear_btn.clicked.connect(self.clear_search)
+        self.clear_btn.setVisible(bool(edit.text()))
+        edit.textChanged.connect(lambda text: self.clear_btn.setVisible(bool(text)))
         self.tick = QTimer(self)
         self.tick.setInterval(250)
         self.tick.timeout.connect(self.refresh)
@@ -1249,6 +1316,10 @@ class SearchDock(QWidget):
             self.animate_focus(True)
         return False
 
+    def clear_search(self):
+        self.edit.clear()
+        self.edit.setFocus(Qt.MouseFocusReason)
+
     def animate_focus(self, focused):
         self.focus_anim.stop()
         self.focus_anim.setStartValue(round(self._focus * 100))
@@ -1268,12 +1339,17 @@ class SearchDock(QWidget):
     def update_geometry(self):
         if self._base_rect.isNull():
             return
-        scale = 1.0 + 0.02 * self._focus
-        width = round(self._base_rect.width() * scale)
-        height = round(self._base_rect.height() * scale)
+        # Grow by a capped number of pixels, not a percentage: 2% of a wide window is more than the dock's
+        # side margin and the focused field would be clipped by the window edges.
+        grow = min(0.02 * self._base_rect.width(), self.MAX_GROW) * self._focus
+        width = round(self._base_rect.width() + grow)
+        height = round(self._base_rect.height() * (1.0 + 0.02 * self._focus))
         center = self._base_rect.center()
         self.setGeometry(QRect(center.x() - width // 2, center.y() - height // 2, width, height))
         self.edit.setGeometry(self.rect())
+        self.clear_btn.move(self.width() - self.clear_btn.width() - 14,
+                            (self.height() - self.clear_btn.height()) // 2)
+        self.clear_btn.raise_()
 
     def refresh(self):
         if self.isVisible() and self._focus in (0.0, 1.0):
@@ -1325,9 +1401,7 @@ class SearchDock(QWidget):
             p.drawPixmap(QRectF(self.rect()), self.backdrop, self.backdrop_src.adjusted(-dx, -dy, dx, dy))
             p.fillPath(path, QColor(14, 14, 14, 110))
         p.setClipping(False)
-        a = round(32 + 20 * self._focus)
-        width = 1.0 + 0.1 * self._focus
-        p.setPen(QPen(QColor(255, 255, 255, a), width))
+        p.setPen(QPen(QColor(255, 255, 255, 32), 1))
         p.drawPath(path)
 
 
@@ -1393,7 +1467,7 @@ class PopupBackdrop(QWidget):
 class ComboItemDelegate(QStyledItemDelegate):
     """Dropdown rows drawn by hand: exact row sizes, and the same soft cursor glow as the buttons,
     faded in and out per row. The current choice gets a flat fill that hovering never changes."""
-    ROW, GAP = 36, 2
+    ROW, GAP = 36, 5
     SELECTED_FILL = 32
     FADE_IN_MS, FADE_OUT_MS = 220, 320
 
@@ -1467,7 +1541,7 @@ class ComboItemDelegate(QStyledItemDelegate):
             if s > 0.0:
                 eased = (1.0 - math.cos(math.pi * s)) / 2.0
                 p.fillPath(path, QColor(255, 255, 255, int(7 * eased)))
-                draw_spotlight(p, path, rect, self.cursor, eased, 90, DROPDOWN_GLOW)
+                draw_spotlight(p, path, rect, self.cursor, eased, 105, DROPDOWN_GLOW)
         font = QFont(option.font)
         font.setPixelSize(15)
         p.setFont(font)
@@ -1651,7 +1725,7 @@ class FluentCombo(QComboBox):
         p.fillPath(path, QColor(11, 11, 11))
         inner = QPainterPath()
         inner.addRoundedRect(r.adjusted(1, 1, -1, -1), 10, 10)
-        draw_spotlight(p, inner, self.rect(), self._cursor_pos, self._hover, 58, DROPDOWN_GLOW)
+        draw_spotlight(p, inner, self.rect(), self._cursor_pos, self._hover, 70, DROPDOWN_GLOW)
         edge = QPainterPath()
         edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 11, 11)
         p.setPen(QPen(QColor(255, 255, 255, 22), 1))
@@ -2129,8 +2203,8 @@ class Kernel(QWidget):
 
         def make_input():
             edit = QLineEdit()
-            edit.setFixedWidth(100)
-            edit.setMinimumHeight(32)
+            edit.setFixedWidth(72)
+            edit.setMinimumHeight(40)
             edit.setAlignment(Qt.AlignCenter)
             return edit
 
@@ -2180,7 +2254,7 @@ class Kernel(QWidget):
         self.contrast_input.editingFinished.connect(self.contrast_input_changed)
         self.vibrance_input.editingFinished.connect(self.vibrance_input_changed)
 
-        controls = Row("Display settings", "Changes preview live and are only kept once you press Apply")
+        controls = Row("")
         self.display_reset_button = Button("Reset")
         self.display_reset_button.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.display_reset_button.clicked.connect(self.reset_display_values)

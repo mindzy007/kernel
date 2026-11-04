@@ -1,5 +1,5 @@
 @echo off
-REM Put this file in the kernel folder (next to kernel.py) and double-click it.
+REM Builds the installer (installer\Kernel-Setup-<version>.exe). For a quick test build use build-portable.bat.
 cd /d "%~dp0"
 
 echo [1/4] Installing tools...
