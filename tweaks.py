@@ -1127,7 +1127,7 @@ TASKS = [
     ("Appearance", "Disable Windows sounds", "Sound scheme to 'No Sounds' and no startup chime", t_sounds),
     ("Appearance", "Apply MacType in system tray", "Use the XMac LCD HotShift profile (MacType must be installed)", t_mactype),
     ("Appearance", "Apply Big Sur cursor", "Install the Big Sur cursor pack and apply it as your cursor scheme", t_cursor),
-    ("NVIDIA", "NVIDIA Profile", "Applies a minimal and optimized NVIDIA Profile Inspector config.", t_nvidia_profile),
+    ("NVIDIA", "Apply NVIDIA Profile", "Applies a minimal and optimized NVIDIA Profile Inspector config.", t_nvidia_profile),
     ("Appearance", "Notepad settings", "Set Notepad's font to Consolas Regular 14", t_notepad),
     ("Input", "Disable enhanced mouse precision", "Turns off pointer acceleration for consistent aim", t_mouse_accel),
     ("Input", "Disable Sticky Keys", "Stops the popup when Shift is pressed five times", t_sticky_keys),

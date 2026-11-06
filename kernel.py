@@ -16,7 +16,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient,
-    QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
+    QPainter, QPainterPath, QPalette, QPen, QPixmap, QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsEffect,
@@ -197,7 +197,7 @@ def draw_spotlight(p, path, rect, center, strength, radius, alpha):
     p.restore()
 
 
-BUTTON_GLOW, DROPDOWN_GLOW = 28, 20  # peak glow alpha; the dropdown stays a step dimmer than buttons
+BUTTON_GLOW, DROPDOWN_GLOW = 17, 14  # peak glow alpha; the dropdown stays a step dimmer than buttons
 
 
 class AnimButton(QPushButton):
@@ -253,15 +253,15 @@ class AnimButton(QPushButton):
 
     def enterEvent(self, e):
         self.snap_cursor(e.position())
-        self.go(self.a_hover, 1.0, 280, QEasingCurve.InOutSine)
+        self.go(self.a_hover, 1.0, 420, QEasingCurve.InOutSine)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self.go(self.a_hover, 0.0, 360, QEasingCurve.InOutSine)
+        self.go(self.a_hover, 0.0, 520, QEasingCurve.InOutSine)
         super().leaveEvent(e)
 
     def mouseMoveEvent(self, e):
-        self.go(self.a_cursor, QPointF(e.position()), 130, QEasingCurve.OutCubic)
+        self.go(self.a_cursor, QPointF(e.position()), 240, QEasingCurve.OutCubic)
         super().mouseMoveEvent(e)
 
     def snap_cursor(self, pos):
@@ -439,7 +439,7 @@ class Button(AnimButton):
             if on and not lit:
                 inner = QPainterPath()  # inside the 1px border, so the stroke itself never changes
                 inner.addRoundedRect(r.adjusted(1, 1, -1, -1), k["r"] - 1, k["r"] - 1)
-                self.spotlight(p, inner, 70, BUTTON_GLOW)
+                self.spotlight(p, inner, 95, BUTTON_GLOW)
             edge = QPainterPath()
             edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), k["r"], k["r"])
             p.setPen(QPen(QColor(255, 255, 255, 22), 1))
@@ -1794,6 +1794,10 @@ class Kernel(QWidget):
 
         self.setObjectName("window")
         self.setWindowTitle("Kernel")
+        pal = self.palette()  # dark native background, so new areas never flash white on first maximize
+        pal.setColor(QPalette.Window, QColor(BG))
+        self.setPalette(pal)
+        self.setAutoFillBackground(True)
         avail = QApplication.primaryScreen().availableGeometry()
         self.resize(min(1180, avail.width() - 80), min(820, avail.height() - 80))
         if self.cfg.win_size:
@@ -3669,6 +3673,11 @@ class Kernel(QWidget):
         try:  # native dark title bar
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 int(self.winId()), 20, ctypes.byref(ctypes.c_int(1)), 4)
+        except Exception:
+            pass
+        try:  # DWMWA_TRANSITIONS_FORCEDISABLED: no maximize/restore snapshot animation (it showed a white frame)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                int(self.winId()), 3, ctypes.byref(ctypes.c_int(1)), 4)
         except Exception:
             pass
 
