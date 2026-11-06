@@ -216,6 +216,46 @@ def t_temp(log):
     log("Recycle Bin emptied.")
 
 
+NVIDIA_CACHE_SCRIPT = r"""
+foreach ($Proc in @("nvcontainer", "NVIDIA Share")) {
+    if (Get-Process -Name $Proc -ErrorAction SilentlyContinue) {
+        Write-Output "Stopping process: $Proc"
+        Stop-Process -Name $Proc -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Output "Process not running: $Proc"
+    }
+}
+$NvidiaCaches = @(
+    "$env:LocalAppData\D3DSCache",
+    "$env:LocalAppData\NVIDIA\GLCache",
+    "$env:AppData\NVIDIA\ComputeCache",
+    "$env:LocalAppData\NVIDIA Corporation\NV_Cache" # Left as a fallback for older driver versions
+)
+
+foreach ($CachePath in $NvidiaCaches) {
+    # Test-Path safely checks if the directory actually exists before doing anything
+    if (Test-Path $CachePath) {
+        $Items = @(Get-ChildItem -Path $CachePath -Force)
+        Write-Output "Clearing cache in: $CachePath ($($Items.Count) items)"
+        $Items | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+        $Left = @(Get-ChildItem -Path $CachePath -Force -ErrorAction SilentlyContinue).Count
+        Write-Output "  Done, $Left item(s) left (in use or locked)"
+    } else {
+        Write-Output "Not found, skipped: $CachePath"
+    }
+}
+"""
+
+
+def t_nvidia_cache(log):
+    log("Clearing NVIDIA shader caches...")
+    out = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", NVIDIA_CACHE_SCRIPT])
+    for line in out.splitlines():
+        if line.strip():
+            log(line.rstrip())
+    log("NVIDIA cache cleared. Games may stutter for 1-2 minutes on first launch while shaders rebuild.")
+
+
 def t_ads(log):
     cdm = r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
     for n in ("SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled",
@@ -1067,7 +1107,7 @@ def _revert_nvidia_profile(log):
 
 
 # Run-once actions shown as buttons instead of toggles
-ONE_SHOT = {"t_temp", "t_system_repair"}
+ONE_SHOT = {"t_temp", "t_system_repair", "t_nvidia_cache"}
 
 # Tweaks with no way back; the UI warns before applying and disables Revert
 IRREVERSIBLE = {"t_onedrive", "t_remove_apps", "t_clear_start"}
@@ -1087,7 +1127,7 @@ TASKS = [
     ("Appearance", "Disable Windows sounds", "Sound scheme to 'No Sounds' and no startup chime", t_sounds),
     ("Appearance", "Apply MacType in system tray", "Use the XMac LCD HotShift profile (MacType must be installed)", t_mactype),
     ("Appearance", "Apply Big Sur cursor", "Install the Big Sur cursor pack and apply it as your cursor scheme", t_cursor),
-    ("Performance", "NVIDIA Profile", "Applies a minimal and optimized NVIDIA Profile Inspector config.", t_nvidia_profile),
+    ("NVIDIA", "NVIDIA Profile", "Applies a minimal and optimized NVIDIA Profile Inspector config.", t_nvidia_profile),
     ("Appearance", "Notepad settings", "Set Notepad's font to Consolas Regular 14", t_notepad),
     ("Input", "Disable enhanced mouse precision", "Turns off pointer acceleration for consistent aim", t_mouse_accel),
     ("Input", "Disable Sticky Keys", "Stops the popup when Shift is pressed five times", t_sticky_keys),
@@ -1102,5 +1142,6 @@ TASKS = [
     ("System", "Clear Start Menu pins", "Removes every pinned shortcut from the Start Menu, requires Windows 11 22H2 or newer. This cannot be reverted.", t_clear_start),
     ("Appearance", "Force dark mode", "Turns on dark mode through the registry, even on Windows that isn't activated", t_dark_mode),
     ("Performance", "Disable Xbox Game Bar", "Disables Xbox Game Bar Overlay, Xbox accessibility control hints and Xbox capture", t_xbox),
+    ("NVIDIA", "Clear NVIDIA cache", "Safely clears temporary NVIDIA cache to fix game stutters. Note: Games may briefly stutter for 1\u20132 minutes during first launch while the GPU regenerates fresh shader files.", t_nvidia_cache),
     ("Performance", "System file repair & maintenance", "Automatically checks, repairs, and maintains Windows system files and components to help resolve corruption, improve system integrity, and remove unnecessary old component files.", t_system_repair),
 ]

@@ -968,6 +968,8 @@ class TaskRow(Row):
             self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
             self.revert.clicked.connect(on_revert)
             self.right.addWidget(self.revert)
+        if self.apply is not None and self.revert is None:
+            self.right.insertSpacing(0, ROW_ACTION_BUTTON_WIDTH + self.right.spacing())
         self.toggle = None
         if on_apply is None:  # a row without an Apply button (Settings) is controlled by its switch
             self.toggle = Toggle()
@@ -992,6 +994,7 @@ class RunRow(Row):
         self.b.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.b.clicked.connect(on_run)
         self.right.addWidget(self.b)
+        self.right.insertSpacing(0, ROW_ACTION_BUTTON_WIDTH + self.right.spacing())
         self.set_active(active)
 
     def set_active(self, active):
@@ -2146,7 +2149,7 @@ class Kernel(QWidget):
             self.nvidia_control = display_controls.NVIDIAControl()
         except display_controls.NVIDIAUnavailable as ex:
             self.nvidia_error = str(ex)
-        page = self.build_tweaks("Performance", ("Performance",))
+        page = self.build_tweaks("Performance", ("Performance", "NVIDIA"))
         self.add_display_controls(page)
         page.col.addStretch()
         return page
@@ -2556,7 +2559,7 @@ class Kernel(QWidget):
             "Input": "System",
             "Security": "System",
         }
-        INLINE = {"Appearance", "Performance", "System"}
+        INLINE = {"Appearance", "Performance", "NVIDIA", "System"}
         visible = [(CATEGORY_MAP.get(cat, cat), name, desc, fn)
                    for cat, name, desc, fn in TASKS]
         toggles = [t for t in visible if t[3].__name__ not in ONE_SHOT]
