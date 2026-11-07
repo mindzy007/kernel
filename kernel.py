@@ -2422,7 +2422,7 @@ class Sidebar(QFrame):
         for _ in range(steps):
             for k in (0, 1):
                 w = self.omega[k]
-                z = 0.85 if k == self.lead_k else 1.0
+                z = 0.8 if k == self.lead_k else 1.0
                 self.vel[k] += (-w * w * (pos[k] - self.goal[k]) - 2 * z * w * self.vel[k]) * h
                 pos[k] += self.vel[k] * h
         if all(abs(pos[k] - self.goal[k]) < 0.05 and abs(self.vel[k]) < 1.0 for k in (0, 1)):
@@ -2445,7 +2445,10 @@ class Sidebar(QFrame):
         p.setRenderHint(QPainter.Antialiasing)
         if self.current is not None and self.edges is not None:
             top, bottom = self.edges
-            r = QRectF(self.current.x(), top, self.current.width(), max(1.0, bottom - top))
+            h = max(1.0, bottom - top)
+            stretch = max(0.0, h - self.current.height())
+            inset = min(3.5, stretch * 0.04)  # jelly squash: the longer it stretches, the slimmer it gets
+            r = QRectF(self.current.x() + inset, top, self.current.width() - 2 * inset, h)
             body = QPainterPath()
             body.addRoundedRect(r, 10, 10)
             p.fillPath(body, QColor(10, 10, 10))  # solid, dark
@@ -2455,7 +2458,7 @@ class Sidebar(QFrame):
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QBrush(line), 1))
             p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
-            ph = min(18.0, r.height() - 8)
+            ph = min(18.0 + stretch * 0.35, r.height() - 8)
             pill = QPainterPath()  # accent pill on the left edge
             pill.addRoundedRect(QRectF(r.left() + 4, r.center().y() - ph / 2, 3, ph), 1.5, 1.5)
             pill_color = QColor(self.accent)
