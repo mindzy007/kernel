@@ -784,6 +784,18 @@ class Toggle(QWidget):
 
 # ---------- rows ----------
 
+class WindowState:
+    """Set while the window is being dragged or resized: heavy background work (blur grabs, typing
+    animation) pauses so the move stays smooth and the UI doesn't twitch."""
+    moving = False  # a drag or resize is in progress
+    dragging = False  # ...and it is a plain title-bar drag (a move, not a resize)
+
+
+class WINDOWPOS(ctypes.Structure):
+    _fields_ = [("hwnd", wintypes.HWND), ("hwndInsertAfter", wintypes.HWND), ("x", ctypes.c_int),
+                ("y", ctypes.c_int), ("cx", ctypes.c_int), ("cy", ctypes.c_int), ("flags", wintypes.UINT)]
+
+
 class HoverFrame(QFrame):
     """Row background that fades in on hover. Only one frame is lit at a time, and a watcher clears the
     highlight if the pointer left without the leave event arriving (the downloads panel does that)."""
@@ -1465,6 +1477,65 @@ class Overlay(QWidget):
             self.closed.emit()
 
 
+class FlatLabel(QLabel):
+    """Muted wrapped text drawn as vector outlines. Normal text rendering changes weight with whatever is behind
+    the text (the frosted panel is translucent, so parts of one line looked bolder than others); outlines give
+    every glyph the same weight and gamma, on any background."""
+
+    def __init__(self, text, size=14, color=MUTED):
+        super().__init__(text)
+        self._color = QColor(color)
+        font = self.font()
+        font.setPixelSize(size)
+        font.setWeight(QFont.Medium)
+        self.setFont(font)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+    def wrapped(self, width):
+        fm = QFontMetricsF(self.font())
+        lines, cur = [], ""
+        for word in self.text().split(" "):
+            trial = (cur + " " + word).strip()
+            if cur and fm.horizontalAdvance(trial) > width:
+                lines.append(cur)
+                cur = word
+            else:
+                cur = trial
+        if cur:
+            lines.append(cur)
+        return lines
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        m = self.contentsMargins()
+        n = len(self.wrapped(max(1, width - m.left() - m.right())))
+        return int(n * QFontMetricsF(self.font()).lineSpacing() + 0.999) + m.top() + m.bottom()
+
+    def sizeHint(self):
+        m = self.contentsMargins()
+        fm = QFontMetricsF(self.font())
+        return QSize(int(fm.horizontalAdvance(self.text())) + m.left() + m.right(), self.heightForWidth(10 ** 6))
+
+    def minimumSizeHint(self):
+        return QSize(10, self.heightForWidth(10 ** 6))
+
+    def paintEvent(self, _):
+        m = self.contentsMargins()
+        fm = QFontMetricsF(self.font())
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(self._color, 0.35)  # a hairline stroke on top of the fill makes the text a touch bolder
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(self._color)
+        for i, line in enumerate(self.wrapped(max(1, self.width() - m.left() - m.right()))):
+            path = QPainterPath()
+            path.addText(QPointF(m.left(), m.top() + fm.ascent() + i * fm.lineSpacing()), self.font(), line)
+            p.drawPath(path)
+
+
 class Panel(QFrame):
     """Frosted-glass panel: paints a blurred copy of what is behind it, tinted dark."""
 
@@ -1560,7 +1631,8 @@ class SearchDock(QWidget):
     """Search field pinned over the bottom of a scrolling page, frosted over whatever scrolls behind it."""
     H, GAP = 60, 22
     MAX_GROW = 28  # px of extra width when focused
-    GROW_H = 0.05  # extra height when focused (fraction)
+    GROW_H = 0.05  # extra height at full scale (fraction)
+    HOVER_SCALE = 0.65  # how much of the full grow a hover reaches
     WIDTH = 700  # the dock is a fixed 700px wide and stays centred (shrinks only on narrow windows)
     SUGGESTIONS = ("OBS Studio", "Discord", "Spotify", "Steam", "VLC", "Visual Studio Code", "7-Zip",
                    "Firefox", "Notepad++", "Audacity", "Python")
@@ -1580,12 +1652,10 @@ class SearchDock(QWidget):
         curve.addCubicBezierSegment(QPointF(0.32, 0.0), QPointF(0.15, 1.0), QPointF(1.0, 1.0))
         self.focus_anim.setEasingCurve(curve)
         self.focus_anim.valueChanged.connect(self._set_focus)
-        self._hover = 0.0  # hover scale: the same kind of ease, a gentler amount
-        self.hover_anim = QVariantAnimation(self)
-        hover_curve = QEasingCurve(QEasingCurve.BezierSpline)
-        hover_curve.addCubicBezierSegment(QPointF(0.22, 0.0), QPointF(0.08, 1.0), QPointF(1.0, 1.0))
-        self.hover_anim.setEasingCurve(hover_curve)
-        self.hover_anim.valueChanged.connect(self._set_hover)
+        self._hover, self._hvel, self._htarget, self._hlast, self._hfresh = 0.0, 0.0, 0.0, 0.0, False
+        self.hover_timer = QTimer(self)  # hover scale chases its target (no bounce), keeping its momentum
+        self.hover_timer.setTimerType(Qt.PreciseTimer)
+        self.hover_timer.timeout.connect(self.hover_step)
         edit.setParent(self)
         edit.setFrame(False)
         edit.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0 54px 0 22px; "
@@ -1636,7 +1706,7 @@ class SearchDock(QWidget):
         """Placeholder typewriter: types an app name, holds, deletes it slowly, moves to the next."""
         word = self.SUGGESTIONS[self.typing_i % len(self.SUGGESTIONS)]
         delay = 600
-        if not self.edit.text() and self.isVisible():
+        if not self.edit.text() and self.isVisible() and not WindowState.moving:
             if self.typing_mode == "type":
                 self.typing_n += 1
                 delay = 70 + (self.typing_n * 37) % 45  # uneven keystrokes feel human
@@ -1674,17 +1744,34 @@ class SearchDock(QWidget):
         self.update_geometry()
         self.update()
 
-    def _set_hover(self, v):
-        self._hover = float(v)
+    def animate_hover(self, hovered):
+        """Set the hover target. A critically damped follower, not a fixed-length tween: entering and
+        leaving in quick succession just redirects it, so it never stalls or restarts from zero."""
+        self._htarget = 1.0 if hovered else 0.0
+        if not self.hover_timer.isActive():
+            hz = self.screen().refreshRate() if self.screen() else 60.0  # tick at the display's rate
+            self.hover_timer.setInterval(max(4, int(1000 / max(hz, 30.0)) - 1))
+            self._hfresh = True
+            self.hover_timer.start()
+
+    def hover_step(self):
+        now = time.monotonic()
+        if self._hfresh:  # first tick only starts the clock
+            self._hfresh, self._hlast = False, now
+            return
+        dt = min(now - self._hlast, 1 / 30)
+        self._hlast = now
+        steps = int(dt / 0.004) + 1
+        h = dt / steps
+        w = 24.0  # stiffness: settles in about a quarter of a second
+        for _ in range(steps):
+            self._hvel += (-w * w * (self._hover - self._htarget) - 2 * w * self._hvel) * h  # damping ratio 1
+            self._hover += self._hvel * h
+        if abs(self._hover - self._htarget) < 0.0005 and abs(self._hvel) < 0.01:
+            self._hover, self._hvel = self._htarget, 0.0
+            self.hover_timer.stop()
         self.update_geometry()
         self.update()
-
-    def animate_hover(self, hovered):
-        self.hover_anim.stop()
-        self.hover_anim.setStartValue(self._hover)
-        self.hover_anim.setEndValue(1.0 if hovered else 0.0)
-        self.hover_anim.setDuration(300 if hovered else 380)  # a slower, softer return
-        self.hover_anim.start()
 
     def enterEvent(self, e):
         self.animate_hover(True)
@@ -1695,11 +1782,7 @@ class SearchDock(QWidget):
         super().leaveEvent(e)
 
     def animate_focus(self, focused):
-        """Ease to the focused (1) or resting (0) size; a new change mid-flight starts from where it is now."""
-        self.focus_anim.stop()
-        self.focus_anim.setStartValue(self._focus)
-        self.focus_anim.setEndValue(1.0 if focused else 0.0)
-        self.focus_anim.start()
+        """Focus no longer changes the size (only hover does); kept so the focus hook still has a target."""
 
     def get_focus_progress(self):
         return round(self._focus * 100)
@@ -1717,7 +1800,7 @@ class SearchDock(QWidget):
         # Grow by a capped number of pixels, not a percentage: 2% of a wide window is more than the dock's
         # side margin and the focused field would be clipped by the window edges.
         room = max(0, self.parentWidget().width() - self._base_rect.width() - 16)  # never wider than the window
-        amount = max(self._focus, 0.4 * self._hover)  # hovering scales a little, focusing scales fully
+        amount = self.HOVER_SCALE * self._hover  # only hovering scales the dock; focusing no longer does
         grow = min(0.04 * self._base_rect.width(), self.MAX_GROW, room) * amount
         width = round(self._base_rect.width() + grow)
         height = round(self._base_rect.height() * (1.0 + self.GROW_H * amount))
@@ -1729,6 +1812,8 @@ class SearchDock(QWidget):
         self.clear_btn.raise_()
 
     def refresh(self):
+        if WindowState.moving:
+            return
         if self.isVisible() and self._focus in (0.0, 1.0) and self._hover in (0.0, 1.0):
             self.capture_backdrop()
 
@@ -2311,7 +2396,7 @@ class TitleBar(QWidget):
         self.fade.stop()
         self.fade.setStartValue(self.amount)
         self.fade.setEndValue(end)
-        self.fade.setDuration(260)
+        self.fade.setDuration(80)  # near-instant: new content under the bar is blurred right away
         self.fade.start()
 
     @staticmethod
@@ -2418,6 +2503,18 @@ class TitleBar(QWidget):
         p.end()
         return out, dpr
 
+    def viewport_x(self, page):
+        return page.viewport().mapTo(self.win, QPoint(0, 0)).x()
+
+    def blur_matches(self):
+        """True if the blurred strip was made for the page's current width and position. A strip made for an
+        older layout would show the old rows (ghost buttons) shifted sideways, so it must never be drawn."""
+        page = self.win.current_scroll_area()
+        if page is None or not self.blur:
+            return False
+        _, x, w, _ = self.blur
+        return w == page.widget().width() and x == self.viewport_x(page)
+
     # ===== REFRESH: Calculate blur amount and update cache =====
     def refresh(self):
         page = self.win.current_scroll_area()
@@ -2428,6 +2525,7 @@ class TitleBar(QWidget):
             c = self.cache
             zone = TITLEBAR_H + TITLEBAR_SOFT
             if (c is None or c["page"] is not page or c["dpr"] != self.win.devicePixelRatioF()
+                    or c["w"] != page.widget().width() or c["x"] != self.viewport_x(page)
                     or value < c["top"] or (value + zone > c["top"] + c["height"]
                                             and c["top"] + c["height"] < page.widget().height())):
                 c = self.cache = self.build_cache(page, value)
@@ -2451,6 +2549,7 @@ class TitleBar(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self.window().windowHandle():
+            WindowState.dragging = True
             self.window().windowHandle().startSystemMove()
 
     def mouseDoubleClickEvent(self, e):
@@ -2477,7 +2576,16 @@ class SoftEdge(QWidget):
         p.fillRect(QRectF(0, TITLEBAR_H, b.win.sidebar.width() + 6, SIDE_FADE), side)
         if not b.blur or b.amount <= 0.0 or self.height() <= 0:
             return
-        img, x, w, dpr = b.blur
+        img, bx, bw, dpr = b.blur
+        page = b.win.current_scroll_area()
+        if page is None:
+            return
+        # Always draw: fit the strip to the page's CURRENT position and width, so it never shows rows at an old
+        # offset (ghost buttons) and never disappears while the window is dragged or resized. If the layout
+        # moved since it was made, ask for a fresh one (it replaces this a moment later).
+        x, w = b.viewport_x(page), page.widget().width()
+        if (x, w) != (bx, bw):
+            b.schedule()
         p.setOpacity(b.amount)
         p.drawImage(QRectF(x, 0, w, self.height()), img, QRectF(0, 0, img.width(), img.height()))
 
@@ -2751,10 +2859,8 @@ class Kernel(QWidget):
         clear.clicked.connect(self.clear_finished)
         head.addWidget(clear)
         pl.addLayout(head)
-        self.dl_hint = QLabel("No downloads yet. Anything you download or install shows up here.")
-        self.dl_hint.setObjectName("muted")
-        self.dl_hint.setStyleSheet("font-size: 16px;")
-        self.dl_hint.setWordWrap(True)
+        self.dl_hint = FlatLabel("No downloads yet. Anything you download or install shows up here.", 15)
+        self.dl_hint.setContentsMargins(0, 4, 0, 0)  # a hair lower
         pl.addWidget(self.dl_hint)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -2829,7 +2935,7 @@ class Kernel(QWidget):
 
     def refresh_pill_backdrop(self):
         if (not self.pill.isVisible() or not self.isActiveWindow() or self.overlay.isVisible()
-                or self.fade or self.pill.isDown()):
+                or self.fade or self.pill.isDown() or WindowState.moving):
             return
         g = self.pill.geometry()
         cur = self.stack.currentWidget()
@@ -2871,7 +2977,7 @@ class Kernel(QWidget):
             for g, r in zip(self.grips, geo):
                 g.setGeometry(*r)
                 g.setVisible(full)
-            self.titlebar.schedule(quiet=True)
+            self.titlebar.schedule()  # real time: the blur under the bar follows every resize step
         self.raise_chrome()
 
     def resizeEvent(self, e):
@@ -4590,6 +4696,26 @@ class Kernel(QWidget):
         super().closeEvent(e)
 
     def nativeEvent(self, event_type, message):
+        if bytes(event_type) == b"windows_generic_MSG":
+            raw = wintypes.MSG.from_address(int(message))
+            m = raw.message
+            if m == 0x0231:  # WM_ENTERSIZEMOVE: a drag or resize started
+                WindowState.moving = True
+                self.titlebar.schedule(instant=True)  # blur matches the content right now, no fade-in
+            elif m == 0x0232:  # WM_EXITSIZEMOVE: it ended
+                WindowState.moving = WindowState.dragging = False
+                self.titlebar.schedule(instant=True)
+            elif m == 0x0046 and WindowState.dragging:  # WM_WINDOWPOSCHANGING while dragging the title bar
+                # Dragging must only move the window. Fractional display scaling can make the size wobble by
+                # a pixel or two on every step, which re-lays out every page and makes the content twitch
+                # left and right. Drop those wobbles (real size changes, like un-maximizing or snapping, pass).
+                wp = WINDOWPOS.from_address(raw.lParam)
+                if not wp.flags & 0x0001:  # SWP_NOSIZE not already set
+                    rect = wintypes.RECT()
+                    ctypes.windll.user32.GetWindowRect(wintypes.HWND(raw.hWnd), ctypes.byref(rect))
+                    if (abs(wp.cx - (rect.right - rect.left)) <= 3 and abs(wp.cy - (rect.bottom - rect.top)) <= 3
+                            and not ctypes.windll.user32.IsZoomed(wintypes.HWND(raw.hWnd))):
+                        wp.flags |= 0x0001
         if CUSTOM_TITLEBAR and bytes(event_type) == b"windows_generic_MSG":
             msg = wintypes.MSG.from_address(int(message))
             if msg.message == 0x0083:  # WM_NCCALCSIZE: the client area is the whole window (no native caption)
