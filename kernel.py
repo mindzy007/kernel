@@ -67,9 +67,10 @@ QPlainTextEdit {{ background: transparent; border: 1px solid {BORDER}; border-ra
 #metric {{ background: #080808; border: 1px solid {BORDER}; border-radius: 12px; }}
 #metricValue {{ font-size: 22px; font-weight: 500; }}
 #attention {{ background: #100e08; border: 1px solid #55421c; border-radius: 14px; }}
-QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #262626; border-radius: 3px; min-height: 30px; }}
-QScrollBar::handle:vertical:hover {{ background: #363636; }}
+QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: #1f1f1f; border-radius: 3px; min-height: 40px; margin: 0 3px; }}
+QScrollBar::handle:vertical:hover {{ background: #3a3a3a; }}
+QScrollBar::handle:vertical:pressed {{ background: #4d4d4d; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QComboBox {{ background: transparent; border: none; padding: 10px 4px 10px 18px;
@@ -1146,6 +1147,159 @@ class JobRow(HoverFrame):
                 subprocess.Popen(f'explorer /select,"{target}"')
 
 
+class IOSScrollBar(QWidget):
+    """iOS-style scrollbar: a floating pill over the content that appears while scrolling or hovering
+    and fades out when idle. Drag the pill, or click the strip to jump."""
+    STRIP, PILL, PILL_HOVER = 14, 5, 7
+
+    def __init__(self, area, top=6, bottom=6):
+        super().__init__(area)
+        self.area, self.bar = area, area.verticalScrollBar()
+        self.top, self.bottom = top, bottom
+        self._op = 0.0
+        self.hover = False
+        self.drag = None  # (mouse y, scroll value) while dragging
+        self.setMouseTracking(True)
+        self.setCursor(Qt.ArrowCursor)
+        self.fade = QVariantAnimation(self)
+        self.fade.setEasingCurve(QEasingCurve.OutCubic)
+        self.fade.valueChanged.connect(self._set_op)
+        self._g = 0.0  # 0 = resting size, 1 = hovered/dragged size
+        self.grow = QVariantAnimation(self)
+        self.grow.setEasingCurve(QEasingCurve.OutCubic)
+        self.grow.valueChanged.connect(self._set_g)
+        self.idle = QTimer(self)
+        self.idle.setSingleShot(True)
+        self.idle.setInterval(900)
+        self.idle.timeout.connect(self.dim)
+        self.bar.valueChanged.connect(self.poke)
+        self.bar.rangeChanged.connect(self.place)
+        area.installEventFilter(self)
+        self.place()
+
+    def eventFilter(self, obj, e):
+        if obj is self.area:
+            if e.type() == QEvent.Resize:
+                self.place()
+            elif e.type() == QEvent.Show:  # flash the pill when the app or a page opens
+                QTimer.singleShot(0, self.poke)
+        return False
+
+    def place(self, *_):
+        a = self.area
+        self.setGeometry(a.width() - self.STRIP, self.top, self.STRIP, max(0, a.height() - self.top - self.bottom))
+        was = self.isVisible()
+        self.setVisible(self.bar.maximum() > self.bar.minimum())
+        self.raise_()
+        self.update()
+        if self.isVisible() and not was:  # content just became scrollable
+            self.poke()
+
+    def _set_op(self, v):
+        self._op = float(v)
+        self.update()
+
+    def _set_g(self, v):
+        self._g = float(v)
+        self.update()
+
+    def _sync_grow(self):
+        target = 1.0 if (self.hover or self.drag) else 0.0
+        if self.grow.state() == QVariantAnimation.Running and self.grow.endValue() == target:
+            return
+        self.grow.stop()
+        self.grow.setStartValue(self._g)
+        self.grow.setEndValue(target)
+        self.grow.setDuration(180)
+        self.grow.start()
+
+    def _fade_to(self, target, ms):
+        self.fade.stop()
+        self.fade.setStartValue(self._op)
+        self.fade.setEndValue(target)
+        self.fade.setDuration(ms)
+        self.fade.start()
+
+    def poke(self, *_):
+        """Show the pill and restart the idle countdown."""
+        if not self.isVisible():
+            return
+        if self._op < 1.0 and not (self.fade.state() == QVariantAnimation.Running and self.fade.endValue() == 1.0):
+            self._fade_to(1.0, 120)
+        self.idle.start()
+
+    def dim(self):
+        if self.hover or self.drag:
+            return
+        self._fade_to(0.0, 450)
+
+    def handle(self):
+        h = self.height()
+        rng = self.bar.maximum() - self.bar.minimum()
+        total = rng + self.bar.pageStep()
+        size = max(44.0, h * self.bar.pageStep() / total) if total > 0 else h
+        y = (h - size) * (self.bar.value() - self.bar.minimum()) / rng if rng > 0 else 0.0
+        return y, size
+
+    def paintEvent(self, _):
+        if self._op <= 0.01:
+            return
+        y, size = self.handle()
+        g = self._g
+        w = self.PILL + (self.PILL_HOVER - self.PILL) * g
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setOpacity(self._op)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, int(70 + 50 * g)))
+        p.drawRoundedRect(QRectF(self.width() - w - 3, y, w, size), w / 2, w / 2)
+
+    def enterEvent(self, e):
+        self.hover = True
+        self.idle.stop()
+        self._fade_to(1.0, 120)
+        self._sync_grow()
+
+    def leaveEvent(self, e):
+        self.hover = False
+        self.idle.start()
+        self._sync_grow()
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        y, size = self.handle()
+        if not (y <= e.position().y() <= y + size):  # click on the strip: centre the pill there
+            self.scroll_to(e.position().y() - size / 2, size)
+            y, size = self.handle()
+        self.drag = (e.position().y(), self.bar.value())
+        self._sync_grow()
+
+    def mouseMoveEvent(self, e):
+        if not self.drag:
+            return
+        y0, v0 = self.drag
+        _, size = self.handle()
+        track = self.height() - size
+        rng = self.bar.maximum() - self.bar.minimum()
+        if track > 0:
+            self.bar.setValue(int(v0 + (e.position().y() - y0) * rng / track))
+
+    def mouseReleaseEvent(self, e):
+        self.drag = None
+        self.idle.start()
+        self._sync_grow()
+
+    def scroll_to(self, y, size):
+        track = self.height() - size
+        rng = self.bar.maximum() - self.bar.minimum()
+        if track > 0:
+            self.bar.setValue(int(self.bar.minimum() + max(0.0, min(1.0, y / track)) * rng))
+
+    def wheelEvent(self, e):
+        QApplication.sendEvent(self.area.viewport(), e)  # keep the eased wheel scrolling over the strip
+
+
 class Page(QScrollArea):
     def __init__(self, title):
         super().__init__()
@@ -1155,9 +1309,8 @@ class Page(QScrollArea):
         content.setObjectName("content")
         self.setWidget(content)
         SmoothScroller(self)
-        if CUSTOM_TITLEBAR:  # scrollbar track starts below the title bar
-            self.verticalScrollBar().setStyleSheet(
-                f"QScrollBar:vertical {{ background: transparent; width: 10px; margin: {TITLEBAR_H + 6}px 2px 2px 2px; }}")
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # the floating pill replaces it
+        self.ios_bar = IOSScrollBar(self, top=TITLEBAR_H + 6 if CUSTOM_TITLEBAR else 6)
         outer = QHBoxLayout(content)
         outer.setContentsMargins(20, 0, 20, 0)
         col = QWidget()
