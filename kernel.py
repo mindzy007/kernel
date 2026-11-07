@@ -1978,9 +1978,13 @@ class CaptionButton(QAbstractButton):
             p.drawLine(cx - 3, cy - 5, cx + 5, cy - 5)
             p.drawLine(cx + 5, cy - 5, cx + 5, cy + 3)
         else:
-            p.setRenderHint(QPainter.Antialiasing)
-            p.drawLine(cx - 5, cy - 5, cx + 5, cy + 5)
-            p.drawLine(cx + 5, cy - 5, cx - 5, cy + 5)
+            p.setRenderHint(QPainter.Antialiasing)  # centred on the pixel grid, same size as the max box
+            pen = QPen(col, 1.15)
+            pen.setCapStyle(Qt.FlatCap)
+            p.setPen(pen)
+            c, d = QPointF(cx, cy), 4.5
+            p.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
+            p.drawLine(QPointF(c.x() + d, c.y() - d), QPointF(c.x() - d, c.y() + d))
 
 
 
