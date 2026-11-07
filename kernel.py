@@ -40,7 +40,7 @@ from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
-TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 56, 4, 24
+TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 56, 4, 56
 TINT = 130  # darkness (0-255) of the title bar blur
 BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
@@ -2080,10 +2080,10 @@ class SoftEdge(QWidget):
     def paintEvent(self, _):
         b = self.bar
         p = QPainter(self)
-        side = QLinearGradient(0, 0, 0, SIDE_FADE)  # sidebar divider fades in under the bar
+        side = QLinearGradient(0, TITLEBAR_H, 0, TITLEBAR_H + SIDE_FADE)  # divider fades in below the bar
         side.setColorAt(0.0, QColor(0, 0, 0, 255))
         side.setColorAt(1.0, QColor(0, 0, 0, 0))
-        p.fillRect(QRectF(0, 0, b.win.sidebar.width() + 6, SIDE_FADE), side)
+        p.fillRect(QRectF(0, TITLEBAR_H, b.win.sidebar.width() + 6, SIDE_FADE), side)
         if not b.blur or b.amount <= 0.0 or self.height() <= 0:
             return
         img, x, w, dpr = b.blur
@@ -2103,6 +2103,20 @@ class EdgeGrip(QWidget):
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self.window().windowHandle():
             self.window().windowHandle().startSystemResize(self.edges)
+
+
+class Sidebar(QFrame):
+    """Sidebar whose divider line fades out at the bottom instead of ending in a hard edge."""
+    FADE = SIDE_FADE
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        p = QPainter(self)
+        top = max(0, self.height() - self.FADE)
+        g = QLinearGradient(0, top, 0, self.height())
+        g.setColorAt(0.0, QColor(0, 0, 0, 0))
+        g.setColorAt(1.0, QColor(0, 0, 0, 255))
+        p.fillRect(QRectF(self.width() - 2, top, 2, self.height() - top), g)
 
 
 class Kernel(QWidget):
@@ -2158,7 +2172,7 @@ class Kernel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        side = QFrame()
+        side = Sidebar()
         self.sidebar = side
         side.setObjectName("sidebar")
         side.setFixedWidth(self.fontMetrics().height() * 12)
