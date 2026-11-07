@@ -1158,7 +1158,7 @@ class Page(QScrollArea):
         col = QWidget()
         outer.addWidget(col, 1)
         self.col = QVBoxLayout(col)
-        self.col.setContentsMargins(0, 28 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 36)
+        self.col.setContentsMargins(0, 48 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 36)
         self.col.setSpacing(0)
         t = QLabel(title)
         t.setObjectName("title")
@@ -2104,25 +2104,6 @@ class EdgeGrip(QWidget):
             self.window().windowHandle().startSystemResize(self.edges)
 
 
-class SideGrip(QWidget):
-    """Thin drag handle that resizes the sidebar."""
-    MIN, MAX = 150, 420
-
-    def __init__(self, side):
-        super().__init__()
-        self.side = side
-        self.setFixedWidth(5)
-        self.setCursor(Qt.SizeHorCursor)
-
-    def mouseMoveEvent(self, e):
-        if e.buttons() & Qt.LeftButton:
-            x = self.side.mapFromGlobal(e.globalPosition().toPoint()).x()
-            self.side.setFixedWidth(max(self.MIN, min(self.MAX, x)))
-            win = self.side.window()
-            if hasattr(win, "titlebar"):
-                win.titlebar.schedule()
-
-
 class Kernel(QWidget):
     logged = Signal(str)
     found = Signal(list)
@@ -2181,7 +2162,7 @@ class Kernel(QWidget):
         side = QFrame()
         self.sidebar = side
         side.setObjectName("sidebar")
-        side.setFixedWidth(210)
+        side.setFixedWidth(self.fontMetrics().height() * 12)
         sl = QVBoxLayout(side)
         sl.setContentsMargins(14, 24, 14, 14)
         sl.setSpacing(4)
@@ -2193,7 +2174,6 @@ class Kernel(QWidget):
             sl.addWidget(logo)
         sl.addSpacing(20)
         outer.addWidget(side)
-        outer.addWidget(SideGrip(side))
 
         right = QWidget()
         rv = QVBoxLayout(right)
@@ -3282,7 +3262,7 @@ class Kernel(QWidget):
 
     def build_apps(self):
         page = Page("Applications")
-        page.col.setContentsMargins(0, 28 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 120)
+        page.col.setContentsMargins(0, 48 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 120)
         page.col.addSpacing(16)
         self.search_box = QLineEdit()
         self.search_box.setObjectName("search")
@@ -3436,7 +3416,7 @@ class Kernel(QWidget):
     def build_activity(self):
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setContentsMargins(20, 28 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 20, 28)
+        pl.setContentsMargins(20, 48 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 20, 28)
         t = QLabel("Activity")
         t.setObjectName("title")
         pl.addWidget(t)
