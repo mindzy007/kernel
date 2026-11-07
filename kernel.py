@@ -2047,7 +2047,10 @@ def native_frame(hwnd):
     user.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
     margins = (ctypes.c_int * 4)(-1, -1, -1, -1)
     dwm.DwmExtendFrameIntoClientArea(ctypes.c_void_p(hwnd), ctypes.byref(margins))
-    for attr, value in ((33, 2), (34, 0x2A2A2A)):  # rounded corners, outline colour
+    # rounded corners, outline colour (the app's own border grey), and everything Windows draws behind the
+    # client area (caption fill, Mica backdrop) set to the app background, so the maximize animation's
+    # ghost frame is black like the app instead of system grey
+    for attr, value in ((33, 2), (34, 0x1A1A1A), (35, 0x000000), (38, 1)):
         dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), attr, ctypes.byref(ctypes.c_int(value)), 4)
 
 
@@ -2167,14 +2170,16 @@ class TitleBar(QWidget):
         self.dirty.setInterval(24)
         self.dirty.timeout.connect(self.refresh)
 
-    def schedule(self, instant=False):
+    def schedule(self, instant=False, quiet=False):
         self.cache = None  # content, size or page changed: re-blur from scratch
         if instant:
             self.snap_next = True
             self.refresh()
             return
-        if not self.dirty.isActive():
-            self.dirty.start()
+        if quiet:  # window resizing / maximizing: wait until it settles so the UI thread stays free
+            self.dirty.start(110)
+        elif not self.dirty.isActive():
+            self.dirty.start(24)
 
     def toggle_max(self):
         self.win.showNormal() if self.win.isMaximized() else self.win.showMaximized()
@@ -2763,7 +2768,7 @@ class Kernel(QWidget):
             for g, r in zip(self.grips, geo):
                 g.setGeometry(*r)
                 g.setVisible(full)
-            self.titlebar.schedule()
+            self.titlebar.schedule(quiet=True)
         self.raise_chrome()
 
     def resizeEvent(self, e):
@@ -4497,8 +4502,33 @@ class Kernel(QWidget):
                 return True, 0
         return super().nativeEvent(event_type, message)
 
+    def prewarm_layout(self):
+        """The first maximize is slow because the whole UI is laid out and painted at screen size for the
+        first time while Windows is already animating. Do that once now, before the window exists on
+        screen (nothing visible, no Windows animation involved), then go back to the normal size."""
+        try:
+            normal = self.size()
+            screen = self.screen() or QApplication.primaryScreen()
+            self.resize(screen.availableGeometry().size())
+            self.grab()  # lays out and renders every visible widget at full-screen size
+            self.resize(normal)
+            self.grab()  # and back, so the first real paint is cheap too
+        except Exception:
+            pass
+
+    def warm_up(self):
+        """Run the blur pipeline once on tiny images so the first maximize doesn't pay its start-up cost."""
+        try:
+            blurred(QPixmap(32, 32))
+            TitleBar._blur_levels(QImage(32, 32, QImage.Format_ARGB32_Premultiplied), 3.0, 18.0)
+        except Exception:
+            pass
+
     def showEvent(self, e):
         super().showEvent(e)
+        if not hasattr(self, "_warmed"):
+            self._warmed = True
+            QTimer.singleShot(700, self.warm_up)
         if CUSTOM_TITLEBAR:
             try:
                 native_frame(int(self.winId()))
@@ -4597,5 +4627,6 @@ if __name__ == "__main__":
     app.setFont(base_font)
     app.setStyleSheet(QSS)
     w = Kernel()
+    w.prewarm_layout()
     w.show()
     sys.exit(app.exec())
