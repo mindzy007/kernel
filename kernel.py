@@ -2277,6 +2277,7 @@ class Sidebar(QFrame):
         self.omega = (30.0, 30.0)  # spring stiffness of the (top, bottom) edge
         self.lead_k = 1
         self.last = 0.0
+        self.fresh = False
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.setInterval(8)
@@ -2304,14 +2305,20 @@ class Sidebar(QFrame):
         if goal[0] != self.goal[0]:
             down = goal[0] > self.edges[0]
             self.lead_k = 1 if down else 0  # moving down: the bottom edge leads
-            self.omega = (28.0, 46.0) if down else (46.0, 28.0)
+            self.omega = (24.0, 40.0) if down else (40.0, 24.0)
         self.goal = goal
-        self.last = time.monotonic()
         if not self.timer.isActive():
+            hz = self.screen().refreshRate() if self.screen() else 60.0  # tick at the display's rate
+            self.timer.setInterval(max(4, int(1000 / max(hz, 30.0)) - 1))
+            self.fresh = True  # the first tick only starts the clock: the page switch just blocked the UI
             self.timer.start()
 
     def tick(self):
         now = time.monotonic()
+        if self.fresh:
+            self.fresh = False
+            self.last = now
+            return
         dt = min(now - self.last, 1 / 30)
         self.last = now
         steps = int(dt / 0.004) + 1
@@ -2348,8 +2355,8 @@ class Sidebar(QFrame):
             body.addRoundedRect(r, 10, 10)
             p.fillPath(body, QColor(10, 10, 10))  # solid, dark
             line = QLinearGradient(0, r.top(), 0, r.bottom())  # hairline border, brighter on top
-            line.setColorAt(0.0, QColor(255, 255, 255, 46))
-            line.setColorAt(1.0, QColor(255, 255, 255, 14))
+            line.setColorAt(0.0, QColor(255, 255, 255, 26))
+            line.setColorAt(1.0, QColor(255, 255, 255, 8))
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QBrush(line), 1))
             p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
