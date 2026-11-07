@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QPropertyAnimation, QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient,
+    QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QFontMetricsF, QIcon, QImage, QLinearGradient,
     QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
 from PySide6.QtWidgets import (
@@ -1559,7 +1559,11 @@ class ClearButton(QAbstractButton):
 class SearchDock(QWidget):
     """Search field pinned over the bottom of a scrolling page, frosted over whatever scrolls behind it."""
     H, GAP = 60, 22
-    MAX_GROW = 12  # px of extra width when focused; must stay under twice the side margin (20)
+    MAX_GROW = 28  # px of extra width when focused
+    GROW_H = 0.05  # extra height when focused (fraction)
+    WIDTH = 700  # the dock is a fixed 700px wide and stays centred (shrinks only on narrow windows)
+    SUGGESTIONS = ("OBS Studio", "Discord", "Spotify", "Steam", "VLC", "Visual Studio Code", "7-Zip",
+                   "Firefox", "Notepad++", "Audacity", "Python")
 
     def __init__(self, page, edit):
         super().__init__(page.parentWidget())
@@ -1570,10 +1574,18 @@ class SearchDock(QWidget):
         self.backdrop = QPixmap()
         self.backdrop_src = QRectF()
         self.backdrop_k = 1.0
-        self.focus_anim = QPropertyAnimation(self, b"focusProgress", self)
-        self.focus_anim.setDuration(360)
-        self.focus_anim.setEasingCurve(
-            QEasingCurve.fromCubicBezier(QPointF(0.22, 0.1), QPointF(0.25, 1.0)))
+        self.focus_anim = QVariantAnimation(self)  # focus scale: one smooth ease, no bounce
+        self.focus_anim.setDuration(380)
+        curve = QEasingCurve(QEasingCurve.BezierSpline)
+        curve.addCubicBezierSegment(QPointF(0.32, 0.0), QPointF(0.15, 1.0), QPointF(1.0, 1.0))
+        self.focus_anim.setEasingCurve(curve)
+        self.focus_anim.valueChanged.connect(self._set_focus)
+        self._hover = 0.0  # hover scale: the same kind of ease, a gentler amount
+        self.hover_anim = QVariantAnimation(self)
+        hover_curve = QEasingCurve(QEasingCurve.BezierSpline)
+        hover_curve.addCubicBezierSegment(QPointF(0.22, 0.0), QPointF(0.08, 1.0), QPointF(1.0, 1.0))
+        self.hover_anim.setEasingCurve(hover_curve)
+        self.hover_anim.valueChanged.connect(self._set_hover)
         edit.setParent(self)
         edit.setFrame(False)
         edit.setStyleSheet("QLineEdit { background: transparent; border: none; padding: 0 54px 0 22px; "
@@ -1591,10 +1603,61 @@ class SearchDock(QWidget):
         if app:
             app.focusChanged.connect(self.focus_changed)
         self.edit.installEventFilter(self)
+        self.typing_i, self.typing_n, self.typing_mode = 0, 0, "type"
+        self.ph_x = 30.0
+        self.ph_text, self.ph_alpha = "", 1.0  # the animated placeholder is drawn by the dock, not the QLineEdit
+        edit.setPlaceholderText("")
+        self.ph_anim = QVariantAnimation(self)
+        self.ph_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.ph_anim.valueChanged.connect(self._set_ph_alpha)
+        edit.textChanged.connect(lambda _t: self.fade_placeholder(self.edit.hasFocus()))
+        self.typer = QTimer(self)
+        self.typer.setSingleShot(True)
+        self.typer.timeout.connect(self.type_step)
+        self.typer.start(900)
+
+    def _set_ph_alpha(self, v):
+        self.ph_alpha = float(v)
+        self.update()
+
+    def fade_placeholder(self, focused):
+        """Placeholder stays (and keeps typing) while the field is empty, even when focused; it fades out
+        once the user types something and back in when the field is emptied."""
+        target = 0.0 if self.edit.text() else 1.0
+        if abs(self.ph_alpha - target) < 0.01 and self.ph_anim.state() != QVariantAnimation.Running:
+            return
+        self.ph_anim.stop()
+        self.ph_anim.setStartValue(self.ph_alpha)
+        self.ph_anim.setEndValue(target)
+        self.ph_anim.setDuration(70 if target == 0.0 else 320)  # vanish almost instantly when typing starts
+        self.ph_anim.start()
+
+    def type_step(self):
+        """Placeholder typewriter: types an app name, holds, deletes it slowly, moves to the next."""
+        word = self.SUGGESTIONS[self.typing_i % len(self.SUGGESTIONS)]
+        delay = 600
+        if not self.edit.text() and self.isVisible():
+            if self.typing_mode == "type":
+                self.typing_n += 1
+                delay = 70 + (self.typing_n * 37) % 45  # uneven keystrokes feel human
+                if self.typing_n >= len(word):
+                    self.typing_mode, delay = "hold", 1500
+            elif self.typing_mode == "hold":
+                self.typing_mode, delay = "delete", 200
+            else:
+                self.typing_n -= 1
+                delay = 55  # slow delete
+                if self.typing_n <= 0:
+                    self.typing_n, self.typing_mode, delay = 0, "type", 450
+                    self.typing_i += 1
+            self.ph_text = word[:self.typing_n]
+            self.update()
+        self.typer.start(delay)
 
     def focus_changed(self, old, new):
         if old is self.edit or new is self.edit:
             self.animate_focus(new is self.edit)
+            self.fade_placeholder(new is self.edit)
 
     def eventFilter(self, obj, event):
         if obj is self.edit and event.type() == QEvent.MouseButtonPress:
@@ -1606,10 +1669,36 @@ class SearchDock(QWidget):
         self.edit.clear()
         self.edit.setFocus(Qt.MouseFocusReason)
 
+    def _set_focus(self, v):
+        self._focus = float(v)
+        self.update_geometry()
+        self.update()
+
+    def _set_hover(self, v):
+        self._hover = float(v)
+        self.update_geometry()
+        self.update()
+
+    def animate_hover(self, hovered):
+        self.hover_anim.stop()
+        self.hover_anim.setStartValue(self._hover)
+        self.hover_anim.setEndValue(1.0 if hovered else 0.0)
+        self.hover_anim.setDuration(300 if hovered else 380)  # a slower, softer return
+        self.hover_anim.start()
+
+    def enterEvent(self, e):
+        self.animate_hover(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.animate_hover(False)
+        super().leaveEvent(e)
+
     def animate_focus(self, focused):
+        """Ease to the focused (1) or resting (0) size; a new change mid-flight starts from where it is now."""
         self.focus_anim.stop()
-        self.focus_anim.setStartValue(round(self._focus * 100))
-        self.focus_anim.setEndValue(100 if focused else 0)
+        self.focus_anim.setStartValue(self._focus)
+        self.focus_anim.setEndValue(1.0 if focused else 0.0)
         self.focus_anim.start()
 
     def get_focus_progress(self):
@@ -1627,9 +1716,11 @@ class SearchDock(QWidget):
             return
         # Grow by a capped number of pixels, not a percentage: 2% of a wide window is more than the dock's
         # side margin and the focused field would be clipped by the window edges.
-        grow = min(0.02 * self._base_rect.width(), self.MAX_GROW) * self._focus
+        room = max(0, self.parentWidget().width() - self._base_rect.width() - 16)  # never wider than the window
+        amount = max(self._focus, 0.4 * self._hover)  # hovering scales a little, focusing scales fully
+        grow = min(0.04 * self._base_rect.width(), self.MAX_GROW, room) * amount
         width = round(self._base_rect.width() + grow)
-        height = round(self._base_rect.height() * (1.0 + 0.02 * self._focus))
+        height = round(self._base_rect.height() * (1.0 + self.GROW_H * amount))
         center = self._base_rect.center()
         self.setGeometry(QRect(center.x() - width // 2, center.y() - height // 2, width, height))
         self.edit.setGeometry(self.rect())
@@ -1638,13 +1729,13 @@ class SearchDock(QWidget):
         self.clear_btn.raise_()
 
     def refresh(self):
-        if self.isVisible() and self._focus in (0.0, 1.0):
+        if self.isVisible() and self._focus in (0.0, 1.0) and self._hover in (0.0, 1.0):
             self.capture_backdrop()
 
     def capture_backdrop(self):
         if not self.isVisible() or self.width() <= 0:
             return
-        m = 24
+        m = 48
         g = self._base_rect
         if g.isNull():
             return
@@ -1656,7 +1747,7 @@ class SearchDock(QWidget):
         if shot.isNull():
             return
         shot.setDevicePixelRatio(1.0)
-        pm = blurred(shot, radius=10)
+        pm = blurred(shot, radius=26)
         k = pm.width() / region.width()
         off = g.topLeft() - region.topLeft()
         self.backdrop = pm
@@ -1666,8 +1757,8 @@ class SearchDock(QWidget):
 
     def place(self):
         host = self.parentWidget()
-        w = max(host.width() - 40, 0)
-        self._base_rect = QRect(20, host.height() - self.H - self.GAP, w, self.H)
+        w = max(min(self.WIDTH, host.width() - 40), 0)
+        self._base_rect = QRect((host.width() - w) // 2, host.height() - self.H - self.GAP, w, self.H)
         self.update_geometry()
         self.update()
         self.raise_()
@@ -1687,6 +1778,18 @@ class SearchDock(QWidget):
             p.drawPixmap(QRectF(self.rect()), self.backdrop, self.backdrop_src.adjusted(-dx, -dy, dx, dy))
             p.fillPath(path, QColor(14, 14, 14, 110))
         p.setClipping(False)
+        if self.ph_text and self.ph_alpha > 0.01:
+            p.setFont(self.edit.font())
+            p.setPen(QColor(138, 138, 138, int(255 * self.ph_alpha)))
+            if not self.edit.text():  # remember where the empty caret sits; typing moves the caret, not this
+                cr = self.edit.cursorRect()
+                if cr.height() > 0:
+                    self.ph_x = cr.x() + 7
+            x = self.ph_x
+            # Centre the letters themselves: a line box also holds the descender gap, which makes text
+            # centred by its line box look a little low. Put the middle of the cap height on the middle.
+            baseline = self.height() / 2 + QFontMetricsF(self.edit.font()).capHeight() / 2
+            p.drawText(QPointF(x, baseline), self.ph_text)
         p.setPen(QPen(QColor(255, 255, 255, 32), 1))
         p.drawPath(path)
 
