@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from PySide6.QtCore import (
     Property, QEasingCurve, QEvent, QObject, QParallelAnimationGroup, QPoint, QPointF, QVariantAnimation,
@@ -2454,8 +2455,8 @@ class Kernel(QWidget):
             self.refresh_display_status()
         if index == SPECS:
             self.start_monitor()
-        if index == STORAGE:
-            self.refresh_drives()
+        if index == STORAGE and not self.storage_scanned:
+            self.refresh_drives(False)  # first visit only (uses saved results if fresh); Rescan forces it
         page = self.stack.currentWidget()
         fx = QGraphicsOpacityEffect(page)
         fx.setOpacity(0.0)
@@ -2998,7 +2999,7 @@ class Kernel(QWidget):
         self.rescan_btn = Button("Rescan")
         self.rescan_btn.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.rescan_btn.setEnabled(False)
-        self.rescan_btn.clicked.connect(self.refresh_drives)
+        self.rescan_btn.clicked.connect(lambda: self.refresh_drives(True))
         header.addWidget(self.rescan_btn)
         page.col.addLayout(header)
         page.col.addSpacing(8)
@@ -3017,6 +3018,7 @@ class Kernel(QWidget):
                 page.add(self.run_row(name, fn))
         page.col.addStretch()
         self.storage_apps = {}
+        self.storage_scanned = False
         self.apps_expanded = False
         self.apps_anim = self.apps_extra = self.apps_more = None
         self.drive_rows = {}
@@ -3025,7 +3027,9 @@ class Kernel(QWidget):
         self.drives_ready.connect(self.show_drives)
         return page
 
-    def refresh_drives(self):
+    def refresh_drives(self, force=True):
+        self.storage_scanned = True
+        self.scan_force = force
         self.rescan_btn.setEnabled(False)
 
         def work():
@@ -3055,28 +3059,55 @@ class Kernel(QWidget):
                 self.drive_box.addWidget(row)
                 self.drive_rows[root] = {"row": row, "bar": bar, "legend": legend, "legend_html": "",
                                          "total": total, "free": free}
+        cached = None if self.scan_force else storage.load_cache(
+            os.path.join(self.cfg.dir, "storage_cache.json"), roots)
         for root, label, free, total in items:
             info = self.drive_rows[root]
             info.update(total=total, free=free)
             info["row"].sub.setText(f"{apps.human(total - free)} used · {apps.human(free)} free of {apps.human(total)}")
             info["row"].sub.show()
+            if cached:
+                continue
             if not info["legend_html"]:
                 info["bar"].set_value(total_fraction(total, free))
                 info["legend"].setText('<span style="color:#8a8a8a">Scanning...</span>')
             info["bar"].set_scanning(True)
+        if cached:  # fresh saved results: no scan at all
+            for root in roots:
+                self.apply_usage(root, cached[root])
+            self.render_apps()
+            self.rescan_btn.setEnabled(True)
+            return
         self.render_apps()
+        cache_path = os.path.join(self.cfg.dir, "storage_cache.json")
 
         def work():
-            try:
-                installed = storage.installed_apps()
-            except Exception:
-                installed = []
-            for root in roots:
+            storage.lower_priority()
+            apps_future = Future()
+
+            def load_apps():
+                storage.lower_priority()
                 try:
-                    res = storage.analyze(root, installed)
+                    apps_future.set_result(storage.installed_apps())
                 except Exception:
-                    res = {"root": [], "user": [], "categories": [], "apps": []}
-                self.storage_ready.emit(root, res)
+                    apps_future.set_result([])
+            threading.Thread(target=load_apps, daemon=True).start()
+            results = {}
+
+            def scan(root):
+                if storage.is_removable(root):  # USB sticks etc.: usage bar only
+                    res = {"root": [], "user": [], "categories": [], "apps": [], "skipped": True}
+                else:
+                    try:
+                        res = storage.analyze(root, apps_future.result)
+                    except Exception:
+                        res = {"root": [], "user": [], "categories": [], "apps": [], "failed": True}
+                results[root] = res
+                self.storage_ready.emit(root, res)  # each drive shows up as soon as it finishes
+            with ThreadPoolExecutor(max(1, min(3, len(roots))), initializer=storage.lower_priority) as pool:
+                list(pool.map(scan, roots))
+            if not any(r.get("failed") for r in results.values()):
+                storage.save_cache(cache_path, results)
             self.scan_finished.emit()
         threading.Thread(target=work, daemon=True).start()
 
@@ -3110,9 +3141,15 @@ class Kernel(QWidget):
         btn.setText("Uninstall")
         subprocess.Popen(app["command"], shell=True)
 
-    def show_usage(self, root, res):
+    def apply_usage(self, root, res):
         self.show_drive_breakdown(root, res.get("categories", []))
         self.storage_apps[root] = res.get("apps", [])
+        if res.get("skipped") and root in self.drive_rows:
+            self.drive_rows[root]["legend"].setText(
+                '<span style="color:#8a8a8a">Removable drive, not scanned</span>')
+
+    def show_usage(self, root, res):
+        self.apply_usage(root, res)
         self.render_apps()
 
     def app_row(self, app, top):

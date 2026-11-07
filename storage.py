@@ -5,10 +5,12 @@ import re
 import shutil
 import string
 import subprocess
+import time
 import winreg
 from concurrent.futures import ThreadPoolExecutor
 
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
+BELOW_NORMAL = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
 MIN_APP_BYTES = 50 * 1024 ** 2
 GAME_DIRS = ("\\steamapps\\", "\\epic games\\", "\\gog galaxy\\games\\", "\\gog games\\", "\\riot games\\",
              "\\xboxgames\\", "\\ubisoft game launcher\\games\\", "\\ea games\\", "\\origin games\\",
@@ -46,6 +48,44 @@ def drives():
         ctypes.windll.kernel32.GetVolumeInformationW(root, buf, 261, None, None, None, None, 0)
         out.append((root, buf.value or "Local Disk", free, total))
     return out
+
+
+def lower_priority():
+    """Background mode for the calling thread: low CPU and low disk priority, so the UI stays smooth."""
+    try:
+        k = ctypes.windll.kernel32
+        k.SetThreadPriority(k.GetCurrentThread(), 0x00010000)  # THREAD_MODE_BACKGROUND_BEGIN
+    except Exception:
+        pass
+
+
+def is_removable(root):
+    """True for USB sticks and other removable drives (not worth a deep scan)."""
+    try:
+        return ctypes.windll.kernel32.GetDriveTypeW(root) == 2
+    except Exception:
+        return False
+
+
+def load_cache(path, roots, max_age=3600):
+    """Saved scan results {root: result} if they are fresh and cover exactly these drives, else None."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if time.time() - data["time"] > max_age or sorted(data["drives"]) != sorted(roots):
+            return None
+        return data["drives"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def save_cache(path, drives):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"time": time.time(), "drives": drives}, f)
+    except (OSError, TypeError):
+        pass
 
 
 def size_of(path):
@@ -88,7 +128,7 @@ def sized_children(folder):
         entries = list(os.scandir(folder))
     except OSError:
         return []
-    with ThreadPoolExecutor(8) as pool:
+    with ThreadPoolExecutor(4, initializer=lower_priority) as pool:
         return [r for r in pool.map(_entry_size, entries) if r]
 
 
@@ -181,7 +221,7 @@ def _registry_apps():
 def _appx_apps():
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", APPX_SCRIPT],
-                           capture_output=True, text=True, creationflags=NOWIN, timeout=60)
+                           capture_output=True, text=True, creationflags=NOWIN | BELOW_NORMAL, timeout=60)
         data = json.loads(r.stdout) if r.stdout.strip() else []
     except Exception:
         return []
@@ -234,7 +274,7 @@ def _steam_apps():
 def installed_apps():
     """Installed desktop apps, Steam games and Store apps with sizes: list of dicts."""
     items = _registry_apps() + _steam_apps() + _appx_apps()
-    with ThreadPoolExecutor(8) as pool:
+    with ThreadPoolExecutor(4, initializer=lower_priority) as pool:
         sizes = list(pool.map(lambda it: size_of(it["location"]) if it["location"] else it["estimate"], items))
     kept, seen = [], set()
     for it, size in sorted(zip(items, sizes), key=lambda p: p[1], reverse=True):
@@ -312,7 +352,9 @@ def analyze(root, apps=None):
         result["user"] = largest(profile, 10)
     try:
         total, used, _ = shutil.disk_usage(root)
-        if apps is None:
+        if callable(apps):  # lazy: lets the folder scan overlap with the installed-apps lookup
+            apps = apps()
+        elif apps is None:
             apps = installed_apps()
     except OSError:
         total, used, apps = 0, sum(r[1] for r in entries), []
