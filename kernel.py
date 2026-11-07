@@ -1,5 +1,6 @@
 """kernel - Windows 11 debloat & optimize tool. Build with build-installer.bat or build-portable.bat."""
 import ctypes
+from ctypes import wintypes
 import html
 import json
 import math
@@ -11,12 +12,12 @@ import threading
 import time
 
 from PySide6.QtCore import (
-    Property, QEasingCurve, QEvent, QObject, QParallelAnimationGroup, QPoint, QPointF,
+    Property, QEasingCurve, QEvent, QObject, QParallelAnimationGroup, QPoint, QPointF, QVariantAnimation,
     QPropertyAnimation, QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient,
-    QPainter, QPainterPath, QPalette, QPen, QPixmap, QRadialGradient,
+    QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsEffect,
@@ -37,6 +38,8 @@ from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
 BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
+CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
+TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 76, 8, 24
 CATEGORY_COLORS = {"Apps": "#5b9cff", "Games": "#b57bff", "Documents & files": "#4fd08a",
                    "System": "#ffb454", "Other": "#8a8a8a"}
 
@@ -1144,12 +1147,15 @@ class Page(QScrollArea):
         content.setObjectName("content")
         self.setWidget(content)
         SmoothScroller(self)
+        if CUSTOM_TITLEBAR:  # scrollbar track starts below the title bar
+            self.verticalScrollBar().setStyleSheet(
+                f"QScrollBar:vertical {{ background: transparent; width: 10px; margin: {TITLEBAR_H + 6}px 2px 2px 2px; }}")
         outer = QHBoxLayout(content)
         outer.setContentsMargins(20, 0, 20, 0)
         col = QWidget()
         outer.addWidget(col, 1)
         self.col = QVBoxLayout(col)
-        self.col.setContentsMargins(0, 28, 0, 36)
+        self.col.setContentsMargins(0, 28 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 36)
         self.col.setSpacing(0)
         t = QLabel(title)
         t.setObjectName("title")
@@ -1740,6 +1746,289 @@ class FluentCombo(QComboBox):
         p.drawText(self.rect().adjusted(0, 0, -14, 0), Qt.AlignRight | Qt.AlignVCenter, "\uE70D")
 
 
+class NCCALCSIZE_PARAMS(ctypes.Structure):
+    _fields_ = [("rgrc", wintypes.RECT * 3), ("lppos", ctypes.c_void_p)]
+
+
+def native_frame(hwnd):
+    """Give the frameless window back the real Windows frame behaviour: open/close/minimize animations,
+    shadow, rounded corners and outline. The visible caption is removed again via WM_NCCALCSIZE."""
+    user, dwm = ctypes.windll.user32, ctypes.windll.dwmapi
+    user.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user.GetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    user.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    style = user.GetWindowLongPtrW(hwnd, -16)  # GWL_STYLE
+    style |= 0x00C00000 | 0x00040000 | 0x00020000 | 0x00010000  # CAPTION THICKFRAME MINIMIZEBOX MAXIMIZEBOX
+    user.SetWindowLongPtrW(hwnd, -16, style)
+    user.SetWindowPos(ctypes.c_void_p(hwnd), None, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+    margins = (ctypes.c_int * 4)(-1, -1, -1, -1)
+    dwm.DwmExtendFrameIntoClientArea(ctypes.c_void_p(hwnd), ctypes.byref(margins))
+    for attr, value in ((33, 2), (34, 0x2A2A2A)):  # rounded corners, outline colour
+        dwm.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), attr, ctypes.byref(ctypes.c_int(value)), 4)
+
+
+class CaptionButton(QAbstractButton):
+    """Minimize / maximize / close button of the custom title bar, drawn by hand."""
+
+    def __init__(self, kind, parent):
+        super().__init__(parent)
+        self.kind = kind
+        self.hv = 0.0
+        self.setFixedSize(46, TITLEBAR_H)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.fade = QVariantAnimation(self)
+        self.fade.setDuration(160)
+        self.fade.setEasingCurve(QEasingCurve.OutCubic)
+        self.fade.valueChanged.connect(self._set_hover)
+
+    def _set_hover(self, v):
+        self.hv = float(v)
+        self.update()
+
+    def _go(self, end):
+        self.fade.stop()
+        self.fade.setStartValue(self.hv)
+        self.fade.setEndValue(end)
+        self.fade.start()
+
+    def enterEvent(self, e):
+        self._go(1.0)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._go(0.0)
+        super().leaveEvent(e)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        close = self.kind == "close"
+        fill = QColor(196, 43, 28, int(255 * self.hv)) if close else QColor(255, 255, 255, int(24 * self.hv))
+        p.fillRect(self.rect(), fill)
+        col = QColor(255, 255, 255) if close and self.hv > 0.5 else QColor(225, 225, 225)
+        p.setPen(QPen(col, 1))
+        cx, cy = self.width() // 2, self.height() // 2
+        if self.kind == "min":
+            p.drawLine(cx - 5, cy, cx + 5, cy)
+        elif self.kind == "max":
+            p.drawRect(cx - 5, cy - 5, 9, 9)
+        elif self.kind == "restore":
+            p.drawRect(cx - 5, cy - 3, 8, 8)
+            p.drawLine(cx - 3, cy - 5, cx + 5, cy - 5)
+            p.drawLine(cx + 5, cy - 5, cx + 5, cy + 3)
+        else:
+            p.setRenderHint(QPainter.Antialiasing)
+            p.drawLine(cx - 5, cy - 5, cx + 5, cy + 5)
+            p.drawLine(cx + 5, cy - 5, cx - 5, cy + 5)
+
+
+class TitleBar(QWidget):
+    """Custom title bar. Transparent at rest; once the page under it is scrolled it shows a blurred,
+    darkened copy of the content passing beneath it (like a website navbar)."""
+    BLUR_RADII = (0.5, 1.0, 1.7, 2.5, 3.4)  # blur levels at quarter resolution (last = under the bar)
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.blur = None  # (blurred strip, x offset, width)
+        self.amount = 0.0
+        self.setFixedHeight(TITLEBAR_H)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.title = QLabel("Kernel")
+        self.title.setObjectName("h1")
+        self.title.setStyleSheet("font-size: 19px; background: transparent;")
+        lay.addSpacing(14)
+        lay.addWidget(self.title)
+        lay.addStretch()
+        self.soft = None
+        self.b_min = CaptionButton("min", self)
+        self.b_max = CaptionButton("max", self)
+        self.b_close = CaptionButton("close", self)
+        for b in (self.b_min, self.b_max, self.b_close):
+            lay.addWidget(b)
+        self.b_min.clicked.connect(win.showMinimized)
+        self.b_max.clicked.connect(self.toggle_max)
+        self.b_close.clicked.connect(win.close)
+        self.target = 0.0
+        self.fade = QVariantAnimation(self)
+        self.fade.setEasingCurve(QEasingCurve.OutCubic)
+        self.fade.valueChanged.connect(self._fade_step)
+        self.fade.finished.connect(self._fade_done)
+        self.dirty = QTimer(self)
+        self.dirty.setSingleShot(True)
+        self.dirty.setInterval(24)
+        self.dirty.timeout.connect(self.refresh)
+
+    def schedule(self):
+        if not self.dirty.isActive():
+            self.dirty.start()
+
+    def toggle_max(self):
+        self.win.showNormal() if self.win.isMaximized() else self.win.showMaximized()
+
+    def sync(self):
+        self.b_max.kind = "restore" if self.win.isMaximized() else "max"
+        self.b_max.update()
+
+    def repaint_all(self):
+        self.update()
+        if self.soft is not None:
+            self.soft.update()
+
+    def _fade_step(self, v):
+        self.amount = float(v)
+        self.repaint_all()
+
+    def _fade_done(self):
+        if self.amount <= 0.0:
+            self.blur = None
+
+    def _fade_to(self, end):
+        if end == self.target:
+            return
+        self.target = end
+        self.fade.stop()
+        self.fade.setStartValue(self.amount)
+        self.fade.setEndValue(end)
+        self.fade.setDuration(260)
+        self.fade.start()
+
+    @staticmethod
+    def _blur_small(img, radius):
+        """Gaussian-style blur of a small image; the edges are padded so they do not fade to transparent."""
+        pad = int(radius * 2) + 2
+        w, h = img.width(), img.height()
+        big = QImage(w + 2 * pad, h + 2 * pad, QImage.Format_ARGB32_Premultiplied)
+        big.fill(Qt.transparent)
+        p = QPainter(big)
+        p.drawImage(pad, pad, img)
+        p.drawImage(QRect(pad, 0, w, pad), img, QRect(0, 0, w, 1))
+        p.drawImage(QRect(pad, pad + h, w, pad), img, QRect(0, h - 1, w, 1))
+        p.drawImage(QRect(0, 0, pad, h + 2 * pad), big, QRect(pad, 0, 1, h + 2 * pad))
+        p.drawImage(QRect(pad + w, 0, pad, h + 2 * pad), big, QRect(pad + w - 1, 0, 1, h + 2 * pad))
+        p.end()
+        scene = QGraphicsScene()
+        item = QGraphicsPixmapItem(QPixmap.fromImage(big))
+        fx = QGraphicsBlurEffect()
+        fx.setBlurRadius(radius)
+        fx.setBlurHints(QGraphicsBlurEffect.QualityHint)
+        item.setGraphicsEffect(fx)
+        scene.addItem(item)
+        out = QImage(big.size(), QImage.Format_ARGB32_Premultiplied)
+        out.fill(Qt.transparent)
+        q = QPainter(out)
+        scene.render(q, QRectF(out.rect()), QRectF(big.rect()))
+        q.end()
+        return out.copy(pad, pad, w, h)
+
+    def compose_blur(self, strip):
+        """Progressive blur: the strongest blur (unreadable) under the bar, then the blur strength and
+        opacity ease down to nothing over a long fade zone, by blending increasingly blurred copies row by row."""
+        dpr = strip.devicePixelRatio() or 1.0
+        fmt = QImage.Format_ARGB32_Premultiplied
+        img = strip.toImage().convertToFormat(fmt)
+        img.setDevicePixelRatio(1.0)
+        w, h = img.width(), img.height()
+        small = img.scaled(max(w // 4, 1), max(h // 4, 1), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        levels = [img] + [self._blur_small(small, r).scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                          .convertToFormat(fmt) for r in self.BLUR_RADII]
+        n = len(levels) - 1
+        zone = min(h, int(round((TITLEBAR_H + TITLEBAR_SOFT) * dpr)))
+        out = QImage(w, zone, fmt)
+        out.fill(Qt.transparent)
+        p = QPainter(out)
+        hold_end = TITLEBAR_H + SOFT_HOLD
+        for py in range(zone):
+            t = min(1.0, max(0.0, (py / dpr - hold_end) / (TITLEBAR_SOFT - SOFT_HOLD)))
+            s = 1.0 - t * t * (3.0 - 2.0 * t)  # smoothstep: 1 under the bar, 0 at the end of the fade
+            pos = s * n
+            lo = min(int(pos), n - 1)
+            f = pos - lo
+            alpha = s ** 0.5
+            row = QRect(0, py, w, 1)
+            p.setCompositionMode(QPainter.CompositionMode_Plus)
+            p.setOpacity(alpha * (1.0 - f))
+            p.drawImage(row, levels[lo], row)
+            if f > 0.004:
+                p.setOpacity(alpha * f)
+                p.drawImage(row, levels[lo + 1], row)
+            p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            p.setOpacity(1.0)
+            p.fillRect(row, QColor(0, 0, 0, int(95 * s)))
+        p.end()
+        return out, dpr
+
+    def refresh(self):
+        page = self.win.current_scroll_area()
+        value = page.verticalScrollBar().value() if page is not None else 0
+        target = min(1.0, value / 70.0)  # the blur builds up over the first 70px of scrolling
+        if target > 0.0:
+            strip = page.grab(QRect(0, 0, page.width(), TITLEBAR_H + TITLEBAR_SOFT + 24))
+            if not strip.isNull():
+                img, dpr = self.compose_blur(strip)
+                self.blur = (img, page.mapTo(self.win, QPoint(0, 0)).x(), page.width(), dpr)
+                self.repaint_all()
+        self._fade_to(target)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        # the sidebar divider starts below the bar instead of being cut off by it
+        p.fillRect(QRectF(0, 0, self.win.sidebar.width() + 6, TITLEBAR_H), QColor(0, 0, 0))
+        if not self.blur or self.amount <= 0.0:
+            return
+        img, x, w, dpr = self.blur
+        p.setOpacity(self.amount)
+        full = QRectF(0, 0, self.width(), TITLEBAR_H)
+        p.fillRect(full, QColor(0, 0, 0))  # one solid bar across the sidebar and the page
+        p.drawImage(QRectF(x, 0, w, TITLEBAR_H), img, QRectF(0, 0, img.width(), TITLEBAR_H * dpr))
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.window().windowHandle():
+            self.window().windowHandle().startSystemMove()
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.toggle_max()
+
+
+class SoftEdge(QWidget):
+    """Blur that keeps going below the title bar and fades out gradually, so the bar has no hard edge."""
+
+    def __init__(self, bar):
+        super().__init__(bar.win)
+        self.bar = bar
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, _):
+        b = self.bar
+        p = QPainter(self)
+        side = QLinearGradient(0, 0, 0, SIDE_FADE)  # sidebar divider fades in under the bar
+        side.setColorAt(0.0, QColor(0, 0, 0, 255))
+        side.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.fillRect(QRectF(0, 0, b.win.sidebar.width() + 6, SIDE_FADE), side)
+        if not b.blur or b.amount <= 0.0 or self.height() <= 0:
+            return
+        img, x, w, dpr = b.blur
+        p.setOpacity(b.amount)
+        p.drawImage(QRectF(x, 0, w, self.height()), img,
+                    QRectF(0, TITLEBAR_H * dpr, img.width(), self.height() * dpr))
+
+
+class EdgeGrip(QWidget):
+    """Invisible strip on a window edge or corner that starts a native resize."""
+
+    def __init__(self, win, edges, cursor):
+        super().__init__(win)
+        self.edges = edges
+        self.setCursor(cursor)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.window().windowHandle():
+            self.window().windowHandle().startSystemResize(self.edges)
+
+
 class SideGrip(QWidget):
     """Thin drag handle that resizes the sidebar."""
     MIN, MAX = 150, 420
@@ -1794,21 +2083,25 @@ class Kernel(QWidget):
 
         self.setObjectName("window")
         self.setWindowTitle("Kernel")
-        pal = self.palette()  # dark native background, so new areas never flash white on first maximize
-        pal.setColor(QPalette.Window, QColor(BG))
-        self.setPalette(pal)
-        self.setAutoFillBackground(True)
         avail = QApplication.primaryScreen().availableGeometry()
         self.resize(min(1180, avail.width() - 80), min(820, avail.height() - 80))
         if self.cfg.win_size:
             self.resize(min(max(self.cfg.win_size[0], 640), avail.width()), min(max(self.cfg.win_size[1], 480), avail.height()))
         self.setMinimumSize(640, 480)
+        if CUSTOM_TITLEBAR:
+            self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint | Qt.WindowMinMaxButtonsHint
+                                | Qt.WindowSystemMenuHint)
+            try:
+                native_frame(int(self.winId()))
+            except Exception:
+                pass
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         side = QFrame()
+        self.sidebar = side
         side.setObjectName("sidebar")
         side.setFixedWidth(210)
         sl = QVBoxLayout(side)
@@ -1816,7 +2109,10 @@ class Kernel(QWidget):
         sl.setSpacing(4)
         logo = QLabel("Kernel")
         logo.setObjectName("h1")
-        sl.addWidget(logo)
+        if CUSTOM_TITLEBAR:  # the name lives in the title bar; keep the same room above the nav
+            sl.addSpacing(logo.sizeHint().height())
+        else:
+            sl.addWidget(logo)
         sl.addSpacing(20)
         outer.addWidget(side)
         outer.addWidget(SideGrip(side))
@@ -1927,7 +2223,39 @@ class Kernel(QWidget):
             for sa in ([w] if isinstance(w, QScrollArea) else w.findChildren(QScrollArea)):
                 sa.verticalScrollBar().valueChanged.connect(self.refresh_pill_backdrop)
         self.fade = None
+        if CUSTOM_TITLEBAR:
+            self.titlebar = TitleBar(self)
+            self.titlebar.soft = self.softedge = SoftEdge(self.titlebar)
+            for i in range(self.stack.count()):
+                w = self.stack.widget(i)
+                for sa in ([w] if isinstance(w, QScrollArea) else w.findChildren(QScrollArea)):
+                    sa.verticalScrollBar().valueChanged.connect(self.titlebar.schedule)
+            self.grips = [
+                EdgeGrip(self, Qt.LeftEdge, Qt.SizeHorCursor), EdgeGrip(self, Qt.RightEdge, Qt.SizeHorCursor),
+                EdgeGrip(self, Qt.TopEdge, Qt.SizeVerCursor), EdgeGrip(self, Qt.BottomEdge, Qt.SizeVerCursor),
+                EdgeGrip(self, Qt.LeftEdge | Qt.TopEdge, Qt.SizeFDiagCursor),
+                EdgeGrip(self, Qt.RightEdge | Qt.TopEdge, Qt.SizeBDiagCursor),
+                EdgeGrip(self, Qt.LeftEdge | Qt.BottomEdge, Qt.SizeBDiagCursor),
+                EdgeGrip(self, Qt.RightEdge | Qt.BottomEdge, Qt.SizeFDiagCursor)]
         self.place_overlay()
+
+    def current_scroll_area(self):
+        cur = self.stack.currentWidget()
+        return cur if isinstance(cur, QScrollArea) else cur.findChild(QScrollArea)
+
+    def raise_chrome(self):
+        if hasattr(self, "titlebar"):
+            self.softedge.raise_()
+            self.titlebar.raise_()
+            for g in self.grips:
+                g.raise_()
+        self.pill.raise_()
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.WindowStateChange and hasattr(self, "titlebar"):
+            self.titlebar.sync()
+            self.place_overlay()
 
     def refresh_pill_backdrop(self):
         if (not self.pill.isVisible() or not self.isActiveWindow() or self.overlay.isVisible()
@@ -1959,10 +2287,22 @@ class Kernel(QWidget):
         self.overlay.setGeometry(0, 0, w, h)
         pw = min(520, w - 48)
         ph = min(600, h - 110)
-        self.overlay.panel.setGeometry(w - 24 - pw, 76, pw, ph)
+        shift = TITLEBAR_H - 16 if hasattr(self, "titlebar") else 0
+        self.overlay.panel.setGeometry(w - 24 - pw, 76 + shift, pw, ph)
         self.pill.adjustSize()
-        self.pill.move(w - 24 - self.pill.width(), 20)
-        self.pill.raise_()
+        self.pill.move(w - 24 - self.pill.width(), 20 + shift)
+        if hasattr(self, "titlebar"):
+            self.titlebar.setGeometry(0, 0, w, TITLEBAR_H)
+            self.softedge.setGeometry(0, TITLEBAR_H, w, TITLEBAR_SOFT)
+            t, c = 4, 8
+            full = not (self.isMaximized() or self.isFullScreen())
+            geo = [(0, c, t, h - 2 * c), (w - t, c, t, h - 2 * c), (c, 0, w - 2 * c - CAPTION_W, t),
+                   (c, h - t, w - 2 * c, t), (0, 0, c, c), (w - c, 0, c, c), (0, h - c, c, c), (w - c, h - c, c, c)]
+            for g, r in zip(self.grips, geo):
+                g.setGeometry(*r)
+                g.setVisible(full)
+            self.titlebar.schedule()
+        self.raise_chrome()
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -1991,7 +2331,7 @@ class Kernel(QWidget):
         self.pill.setChecked(True)
         self.run_fade(start, 1.0, show=True)
         self.overlay.raise_()
-        self.pill.raise_()
+        self.raise_chrome()
 
     def collapse_downloads(self):
         self.pill.setChecked(False)
@@ -2052,6 +2392,8 @@ class Kernel(QWidget):
             return
         self.finish_anim()
         self.stack.setCurrentIndex(index)
+        if hasattr(self, "titlebar"):
+            self.titlebar.schedule()
         if index == GAMING:
             self.refresh_display_status()
         if index == SPECS:
@@ -3668,16 +4010,42 @@ class Kernel(QWidget):
             j.request_cancel()
         super().closeEvent(e)
 
+    def nativeEvent(self, event_type, message):
+        if CUSTOM_TITLEBAR and bytes(event_type) == b"windows_generic_MSG":
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == 0x0083:  # WM_NCCALCSIZE: the client area is the whole window (no native caption)
+                if msg.wParam and ctypes.windll.user32.IsZoomed(wintypes.HWND(msg.hWnd)):
+                    params = NCCALCSIZE_PARAMS.from_address(msg.lParam)
+                    gm = ctypes.windll.user32.GetSystemMetrics
+                    bx, by = gm(32) + gm(92), gm(33) + gm(92)  # sizeframe + padded border
+                    r = params.rgrc[0]
+                    r.left += bx
+                    r.right -= bx
+                    r.top += by
+                    r.bottom -= by
+                return True, 0
+        return super().nativeEvent(event_type, message)
+
     def showEvent(self, e):
         super().showEvent(e)
+        if CUSTOM_TITLEBAR:
+            try:
+                native_frame(int(self.winId()))
+            except Exception:
+                pass
         try:  # native dark title bar
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 int(self.winId()), 20, ctypes.byref(ctypes.c_int(1)), 4)
         except Exception:
             pass
-        try:  # DWMWA_TRANSITIONS_FORCEDISABLED: no maximize/restore snapshot animation (it showed a white frame)
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                int(self.winId()), 3, ctypes.byref(ctypes.c_int(1)), 4)
+        try:  # black native background brush: unpainted areas during the first maximize are black, not white
+            gdi, user = ctypes.windll.gdi32, ctypes.windll.user32
+            gdi.CreateSolidBrush.restype = ctypes.c_void_p
+            user.SetClassLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+            user.SetClassLongPtrW.restype = ctypes.c_void_p
+            if not hasattr(self, "_bg_brush"):
+                self._bg_brush = gdi.CreateSolidBrush(0x000000)
+            user.SetClassLongPtrW(int(self.winId()), -10, self._bg_brush)  # GCLP_HBRBACKGROUND
         except Exception:
             pass
 
