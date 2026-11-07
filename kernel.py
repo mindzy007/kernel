@@ -44,6 +44,8 @@ TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 56, 4, 
 TINT = 130  # darkness (0-255) of the title bar blur
 BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
+ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
+           ("Green", "#4fd08a"), ("Amber", "#ffb454"), ("Red", "#ff6b6b"))
 CATEGORY_COLORS = {"Apps": "#5b9cff", "Games": "#b57bff", "Documents & files": "#4fd08a",
                    "System": "#ffb454", "Other": "#8a8a8a"}
 
@@ -129,6 +131,7 @@ class Config:
         self.applied = {}
         self.smooth_scroll = True
         self.cpu_temp_mode = "average"
+        self.accent = ACCENTS[0][1]
         self.nvidia_displays = {}
         self.legacy_display = None
         self.win_size = None
@@ -151,6 +154,8 @@ class Config:
             self.smooth_scroll = d["smooth_scroll"]
         if d.get("cpu_temp_mode") in ("average", "per_core"):
             self.cpu_temp_mode = d["cpu_temp_mode"]
+        if isinstance(d.get("accent"), str) and d["accent"].lower() in [c for _, c in ACCENTS]:
+            self.accent = d["accent"].lower()
         gamma_ok = lambda g: type(g) is int and 40 <= g <= 280
         contrast_ok = lambda c: type(c) is int and 0 <= c <= 100
         if gamma_ok(d.get("nvidia_gamma")) and contrast_ok(d.get("nvidia_contrast")):
@@ -175,6 +180,7 @@ class Config:
                            "download_dir": self.download_dir,
                            "smooth_scroll": self.smooth_scroll,
                            "cpu_temp_mode": self.cpu_temp_mode,
+                           "accent": self.accent,
                            "nvidia_displays": self.nvidia_displays,
                            "window": self.win_size}, f, indent=2)
             return True
@@ -1145,6 +1151,86 @@ class JobRow(HoverFrame):
                 os.startfile(target)
             else:
                 subprocess.Popen(f'explorer /select,"{target}"')
+
+
+class ColorSwatches(QWidget):
+    """Row of round colour swatches; hover grows a swatch, the selection ring fades between them."""
+    changed = Signal(str)
+    D, GAP, H = 22, 12, 34
+
+    def __init__(self, colors, current):
+        super().__init__()
+        self.colors = [c for _, c in colors]
+        self.names = [n for n, _ in colors]
+        self.current = self.colors.index(current) if current in self.colors else 0
+        n = len(self.colors)
+        self.hv = [0.0] * n
+        self.sv = [1.0 if i == self.current else 0.0 for i in range(n)]
+        self.hover = -1
+        self.setMouseTracking(True)
+        self.setFixedSize(n * self.D + (n - 1) * self.GAP + 8, self.H)
+        self.tick = QTimer(self)
+        self.tick.setInterval(16)
+        self.tick.timeout.connect(self.step)
+
+    def centre(self, i):
+        return QPointF(4 + self.D / 2 + i * (self.D + self.GAP), self.H / 2)
+
+    def step(self):
+        moving = False
+        for i in range(len(self.colors)):
+            for arr, goal in ((self.hv, 1.0 if i == self.hover else 0.0), (self.sv, 1.0 if i == self.current else 0.0)):
+                d = goal - arr[i]
+                if abs(d) > 0.01:
+                    arr[i] += d * 0.28
+                    moving = True
+                else:
+                    arr[i] = goal
+        if not moving:
+            self.tick.stop()
+        self.update()
+
+    def at(self, pos):
+        for i in range(len(self.colors)):
+            c = self.centre(i)
+            if (pos.x() - c.x()) ** 2 + (pos.y() - c.y()) ** 2 <= (self.D / 2 + self.GAP / 2) ** 2:
+                return i
+        return -1
+
+    def mouseMoveEvent(self, e):
+        i = self.at(e.position())
+        if i != self.hover:
+            self.hover = i
+            self.setCursor(Qt.PointingHandCursor if i >= 0 else Qt.ArrowCursor)
+            self.setToolTip(self.names[i] if i >= 0 else "")
+            self.tick.start()
+
+    def leaveEvent(self, e):
+        self.hover = -1
+        self.tick.start()
+
+    def mousePressEvent(self, e):
+        i = self.at(e.position())
+        if e.button() == Qt.LeftButton and i >= 0 and i != self.current:
+            self.current = i
+            self.tick.start()
+            self.changed.emit(self.colors[i])
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        for i, hexcolor in enumerate(self.colors):
+            c = self.centre(i)
+            r = self.D / 2 - 2 + 1.5 * self.hv[i] - 1.5 * self.sv[i]
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(hexcolor))
+            p.drawEllipse(c, r, r)
+            if self.sv[i] > 0.01:
+                ring = QColor(hexcolor)
+                ring.setAlphaF(self.sv[i])
+                p.setPen(QPen(ring, 1.6))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(c, self.D / 2 + 1.5, self.D / 2 + 1.5)
 
 
 class IOSScrollBar(QWidget):
@@ -2275,6 +2361,7 @@ class Sidebar(QFrame):
     def __init__(self):
         super().__init__()
         self.current = None
+        self.accent = QColor(255, 255, 255)
         self.edges = None  # (top, bottom) of the highlight right now
         self.goal = None
         self.vel = [0.0, 0.0]
@@ -2286,6 +2373,10 @@ class Sidebar(QFrame):
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.setInterval(8)
         self.timer.timeout.connect(self.tick)
+
+    def set_accent(self, color):
+        self.accent = QColor(color)
+        self.update()
 
     def _set_edges(self, edges):
         old, self.edges = self.edges, edges
@@ -2367,7 +2458,9 @@ class Sidebar(QFrame):
             ph = min(18.0, r.height() - 8)
             pill = QPainterPath()  # accent pill on the left edge
             pill.addRoundedRect(QRectF(r.left() + 4, r.center().y() - ph / 2, 3, ph), 1.5, 1.5)
-            p.fillPath(pill, QColor(255, 255, 255, 230))
+            pill_color = QColor(self.accent)
+            pill_color.setAlpha(235)
+            p.fillPath(pill, pill_color)
         top = max(0, self.height() - self.FADE)
         g = QLinearGradient(0, top, 0, self.height())
         g.setColorAt(0.0, QColor(0, 0, 0, 0))
@@ -4047,6 +4140,12 @@ class Kernel(QWidget):
         self.cpu_temp_combo.currentIndexChanged.connect(lambda: self.set_cpu_temp_mode())
         temp.right.addWidget(self.cpu_temp_combo)
         page.add(temp)
+        accent = Row("Accent color", "Color of the selection pill in the sidebar")
+        self.accent_swatches = ColorSwatches(ACCENTS, self.cfg.accent)
+        self.accent_swatches.changed.connect(self.set_accent)
+        accent.right.addWidget(self.accent_swatches)
+        page.add(accent)
+        self.sidebar.set_accent(self.cfg.accent)
         page.section("Downloads")
         self.dl_row = Row("Download location", self.cfg.download_dir)
         for text, fn in (("Change", self.pick_dir), ("Open", self.open_dir)):
@@ -4261,6 +4360,11 @@ class Kernel(QWidget):
         if apply:
             self.apply_saved_display_settings()
         self.load_display(self.current_display)
+
+    def set_accent(self, color):
+        self.cfg.accent = color
+        self.sidebar.set_accent(color)
+        self.cfg.save()
 
     def set_smooth(self, on):
         SmoothScroller.on = on
