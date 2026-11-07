@@ -1268,10 +1268,9 @@ class ColorSwatches(QWidget):
 class IOSScrollBar(QWidget):
     """iOS-style scrollbar: a floating pill over the content that appears while scrolling or hovering
     and fades out when idle. Drag the pill, or click the strip to jump."""
-    STRIP, PILL, PILL_HOVER = 14, 5, 7
-
-    def __init__(self, area, top=6, bottom=6):
+    def __init__(self, area, top=6, bottom=6, pill=(5, 7), strip=14):
         super().__init__(area)
+        self.PILL, self.PILL_HOVER, self.STRIP = pill[0], pill[1], strip
         self.area, self.bar = area, area.verticalScrollBar()
         self.top, self.bottom = top, bottom
         self._op = 0.0
@@ -2652,6 +2651,7 @@ class Kernel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setObjectName("dlscroll")
         scroll.setStyleSheet("#dlscroll { background: transparent; border: none; }")
         scroll.viewport().setObjectName("dlvp")
@@ -2665,6 +2665,7 @@ class Kernel(QWidget):
         self.dl_list.addStretch()
         scroll.setWidget(inner)
         SmoothScroller(scroll)
+        self.dl_bar = IOSScrollBar(scroll, top=4, bottom=4, pill=(4, 6), strip=12)  # same pill as the pages, smaller
         pl.addWidget(scroll, 1)
         self.job_rows = []
         self.overlay.hide()
