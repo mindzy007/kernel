@@ -502,8 +502,12 @@ class NavButton(AnimButton):
         r = QRectF(self.rect())
         path = QPainterPath()
         path.addRoundedRect(r, 10, 10)
-        p.fillPath(path, QColor(255, 255, 255, int(20 * s)))
         self.spotlight(p, path, 150, BUTTON_GLOW * 0.85 * (1 - s))
+        edge = h * 0.3 * (1 - s)  # faint hover border; the selected highlight is drawn by the sidebar
+        if edge > 0.01:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255, int(30 * edge)), 1))
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
         t = max(s, h * 0.7)
         c = QColor(int(lerp(122, 255, t)), int(lerp(122, 255, t)), int(lerp(122, 255, t)))
         p.setPen(c)
@@ -2106,12 +2110,100 @@ class EdgeGrip(QWidget):
 
 
 class Sidebar(QFrame):
-    """Sidebar whose divider line fades out at the bottom instead of ending in a hard edge."""
+    """Sidebar whose selection highlight follows the active item on a spring: both edges chase the target,
+    the leading edge stiffer than the trailing one (so it stretches), and a new click mid-flight keeps
+    its momentum. The divider fades out at both ends."""
     FADE = SIDE_FADE
+
+    def __init__(self):
+        super().__init__()
+        self.current = None
+        self.edges = None  # (top, bottom) of the highlight right now
+        self.goal = None
+        self.vel = [0.0, 0.0]
+        self.omega = (30.0, 30.0)  # spring stiffness of the (top, bottom) edge
+        self.lead_k = 1
+        self.last = 0.0
+        self.timer = QTimer(self)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.setInterval(8)
+        self.timer.timeout.connect(self.tick)
+
+    def _set_edges(self, edges):
+        old, self.edges = self.edges, edges
+        if self.current is None or old is None:
+            self.update()
+            return
+        top = int(min(old[0], edges[0])) - 2  # repaint only the strip the highlight crossed
+        bottom = int(max(old[1], edges[1])) + 3
+        self.update(QRect(0, top, self.width(), bottom - top))
+
+    def select(self, btn):
+        """Make btn the highlighted item; the highlight springs over if the sidebar is showing."""
+        self.current = btn
+        goal = (float(btn.y()), float(btn.y() + btn.height()))
+        if self.edges is None or not self.isVisible():
+            self.edges = self.goal = goal
+            self.vel = [0.0, 0.0]
+            self.timer.stop()
+            self.update()
+            return
+        if goal[0] != self.goal[0]:
+            down = goal[0] > self.edges[0]
+            self.lead_k = 1 if down else 0  # moving down: the bottom edge leads
+            self.omega = (28.0, 46.0) if down else (46.0, 28.0)
+        self.goal = goal
+        self.last = time.monotonic()
+        if not self.timer.isActive():
+            self.timer.start()
+
+    def tick(self):
+        now = time.monotonic()
+        dt = min(now - self.last, 1 / 30)
+        self.last = now
+        steps = int(dt / 0.004) + 1
+        h = dt / steps
+        pos = list(self.edges)
+        for _ in range(steps):
+            for k in (0, 1):
+                w = self.omega[k]
+                z = 0.85 if k == self.lead_k else 1.0
+                self.vel[k] += (-w * w * (pos[k] - self.goal[k]) - 2 * z * w * self.vel[k]) * h
+                pos[k] += self.vel[k] * h
+        if all(abs(pos[k] - self.goal[k]) < 0.05 and abs(self.vel[k]) < 1.0 for k in (0, 1)):
+            pos = list(self.goal)
+            self.vel = [0.0, 0.0]
+            self.timer.stop()
+        self._set_edges((pos[0], pos[1]))
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.current is not None:  # layout moved the buttons: snap, don't animate
+            self.timer.stop()
+            self.vel = [0.0, 0.0]
+            self.edges = self.goal = (float(self.current.y()), float(self.current.y() + self.current.height()))
+            self.update()
 
     def paintEvent(self, e):
         super().paintEvent(e)
         p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        if self.current is not None and self.edges is not None:
+            top, bottom = self.edges
+            r = QRectF(self.current.x(), top, self.current.width(), max(1.0, bottom - top))
+            body = QPainterPath()
+            body.addRoundedRect(r, 10, 10)
+            p.fillPath(body, QColor(10, 10, 10))  # solid, dark
+            line = QLinearGradient(0, r.top(), 0, r.bottom())  # hairline border, brighter on top
+            line.setColorAt(0.0, QColor(255, 255, 255, 46))
+            line.setColorAt(1.0, QColor(255, 255, 255, 14))
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QBrush(line), 1))
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+            ph = min(18.0, r.height() - 8)
+            pill = QPainterPath()  # accent pill on the left edge
+            pill.addRoundedRect(QRectF(r.left() + 4, r.center().y() - ph / 2, 3, ph), 1.5, 1.5)
+            p.fillPath(pill, QColor(255, 255, 255, 230))
         top = max(0, self.height() - self.FADE)
         g = QLinearGradient(0, top, 0, self.height())
         g.setColorAt(0.0, QColor(0, 0, 0, 0))
@@ -2216,6 +2308,7 @@ class Kernel(QWidget):
         sl.addWidget(self.nav("Settings", SETTINGS, "settings", group))
         self.navs.sort(key=lambda b: b[0])
         self.navs[0][1].setChecked(True)
+        self.sidebar.select(self.navs[0][1])
 
         self.build_overlay()
 
@@ -2459,6 +2552,8 @@ class Kernel(QWidget):
             self.collapse_downloads()
         for i, b in self.navs:
             b.setChecked(i == index)
+            if i == index:
+                self.sidebar.select(b)
         if index == self.stack.currentIndex():
             return
         self.finish_anim()
@@ -2476,7 +2571,7 @@ class Kernel(QWidget):
         fx.setOpacity(0.0)
         page.setGraphicsEffect(fx)
         fade = QPropertyAnimation(fx, b"opacity")
-        fade.setDuration(220)
+        fade.setDuration(150)
         fade.setStartValue(0.0)
         fade.setEndValue(1.0)
         group = QParallelAnimationGroup(self)
