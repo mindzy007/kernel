@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QPropertyAnimation, QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient,
+    QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient,
     QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
 from PySide6.QtWidgets import (
@@ -785,7 +785,24 @@ class Toggle(QWidget):
 # ---------- rows ----------
 
 class HoverFrame(QFrame):
-    """Row background that fades in on hover."""
+    """Row background that fades in on hover. Only one frame is lit at a time, and a watcher clears the
+    highlight if the pointer left without the leave event arriving (the downloads panel does that)."""
+    HOVER_LEVEL = 15  # brightness (0-255) of the hovered background
+    active = None
+    watch = None
+
+    @staticmethod
+    def check():
+        a = HoverFrame.active
+        if a is None or not isValid(a):
+            HoverFrame.active = None
+            HoverFrame.watch.stop()
+            return
+        if not a.isVisible() or not a.rect().contains(a.mapFromGlobal(QCursor.pos())):
+            a.fade(0.0, 240)
+            HoverFrame.active = None
+            HoverFrame.watch.stop()
+
     def __init__(self):
         super().__init__()
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -810,10 +827,22 @@ class HoverFrame(QFrame):
         self.a_h.start()
 
     def enterEvent(self, e):
+        prev = HoverFrame.active
+        if prev is not None and prev is not self and isValid(prev):
+            prev.fade(0.0, 200)  # hand the highlight over: never two lit rows
+        HoverFrame.active = self
+        if HoverFrame.watch is None:
+            HoverFrame.watch = QTimer()
+            HoverFrame.watch.setInterval(120)
+            HoverFrame.watch.timeout.connect(HoverFrame.check)
+        if not HoverFrame.watch.isActive():
+            HoverFrame.watch.start()
         self.fade(1.0, 160)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
+        if HoverFrame.active is self:
+            HoverFrame.active = None
         self.fade(0.0, 240)
         super().leaveEvent(e)
 
@@ -822,8 +851,9 @@ class HoverFrame(QFrame):
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
             p.setPen(Qt.NoPen)
-            v = int(15 * self._h)
-            p.setBrush(QColor(v, v, v))
+            # translucent white, so the fade-out blends smoothly into whatever is behind the row and
+            # never passes through a gray that is darker than the panel (that looked like a lingering box)
+            p.setBrush(QColor(255, 255, 255, int(self.HOVER_LEVEL * self._h)))
             p.drawRoundedRect(self.rect(), 14, 14)
             p.end()
         super().paintEvent(e)
@@ -1097,6 +1127,8 @@ class ElidedLabel(QLabel):
 
 
 class JobRow(HoverFrame):
+    HOVER_LEVEL = 18  # alpha of the white hover wash; a bit lighter than other rows
+
     def __init__(self, job, kernel):
         super().__init__()
         self.setObjectName("row")
@@ -1448,10 +1480,15 @@ class Panel(QFrame):
         path = QPainterPath()
         path.addRoundedRect(r, 18, 18)
         p.setClipPath(path)
+        # Source mode replaces whatever is underneath, so a partial repaint (a hovered row) can never
+        # stack another tinted layer on top of the old one and leave dark boxes behind.
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        p.fillPath(path, QColor(0, 0, 0, 255))
         if self.bg:
             k = self.bg.width() / max(self.window().width(), 1)
             g = self.geometry()
             p.drawPixmap(QRectF(self.rect()), self.bg, QRectF(g.x() * k, g.y() * k, g.width() * k, g.height() * k))
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
         p.fillPath(path, QColor(12, 12, 12, 150))
         p.setClipping(False)
         p.setPen(QPen(QColor(255, 255, 255, 28), 1))
