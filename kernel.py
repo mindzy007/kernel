@@ -1414,12 +1414,12 @@ class SearchDock(QWidget):
 def blurred(pm, radius=18):
     """Blur a window screenshot (downscaled first, so it stays fast on big monitors)."""
     pm.setDevicePixelRatio(1.0)
-    small = pm.scaled(max(pm.width() // 2, 1), max(pm.height() // 2, 1), Qt.IgnoreAspectRatio,
+    small = pm.scaled(max(pm.width() // 4, 1), max(pm.height() // 4, 1), Qt.IgnoreAspectRatio,
                       Qt.SmoothTransformation)
     scene = QGraphicsScene()
     item = QGraphicsPixmapItem(small)
     fx = QGraphicsBlurEffect()
-    fx.setBlurRadius(radius)
+    fx.setBlurRadius(radius / 2)
     fx.setBlurHints(QGraphicsBlurEffect.QualityHint)
     item.setGraphicsEffect(fx)
     scene.addItem(item)
@@ -2121,8 +2121,6 @@ class Kernel(QWidget):
     def __init__(self):
         super().__init__()
         self.cfg = Config()
-        self.prefetch = self.scan_source = None
-        self.start_storage_prefetch()
         SmoothScroller.on = self.cfg.smooth_scroll
         self.jobs = JobManager(os.path.join(self.cfg.dir, "downloads.json"))
         self.icons, self.icon_widgets, self.icon_pending = {}, {}, set()
@@ -2456,6 +2454,8 @@ class Kernel(QWidget):
             self.refresh_display_status()
         if index == SPECS:
             self.start_monitor()
+        if index == STORAGE:
+            self.refresh_drives()
         page = self.stack.currentWidget()
         fx = QGraphicsOpacityEffect(page)
         fx.setOpacity(0.0)
@@ -3023,40 +3023,14 @@ class Kernel(QWidget):
         self.storage_ready.connect(self.show_usage)
         self.scan_finished.connect(lambda: self.rescan_btn.setEnabled(True))
         self.drives_ready.connect(self.show_drives)
-        self.refresh_drives()
         return page
 
     def refresh_drives(self):
         self.rescan_btn.setEnabled(False)
-        pre, self.prefetch = self.prefetch, None
 
         def work():
-            self.drives_ready.emit(pre["drives"].result() if pre else storage.drives())
+            self.drives_ready.emit(storage.drives())
         threading.Thread(target=work, daemon=True).start()
-        self.scan_source = pre
-
-    def start_storage_prefetch(self):
-        from concurrent.futures import Future
-        pre = {"drives": Future(), "installed": Future(), "res": {}, "done": threading.Event()}
-
-        def run():
-            try:
-                drives = storage.drives()
-            except Exception:
-                drives = []
-            pre["drives"].set_result(drives)
-            try:
-                installed = storage.installed_apps()
-            except Exception:
-                installed = []
-            for d in drives:
-                try:
-                    pre["res"][d[0]] = storage.analyze(d[0], installed)
-                except Exception:
-                    pre["res"][d[0]] = {"root": [], "user": [], "categories": [], "apps": []}
-            pre["done"].set()
-        threading.Thread(target=run, daemon=True).start()
-        self.prefetch = pre
 
     def show_drives(self, items):
         roots = [i[0] for i in items]
@@ -3092,16 +3066,7 @@ class Kernel(QWidget):
             info["bar"].set_scanning(True)
         self.render_apps()
 
-        pre, self.scan_source = self.scan_source, None
-
         def work():
-            if pre:
-                pre["done"].wait()
-                for root in roots:
-                    self.storage_ready.emit(root, pre["res"].get(
-                        root, {"root": [], "user": [], "categories": [], "apps": []}))
-                self.scan_finished.emit()
-                return
             try:
                 installed = storage.installed_apps()
             except Exception:
