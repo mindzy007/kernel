@@ -39,7 +39,7 @@ from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
-TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 76, 8, 24
+TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 56, 4, 24
 TINT = 130  # darkness (0-255) of the title bar blur
 BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
@@ -1686,7 +1686,7 @@ class FluentCombo(QComboBox):
     def fade_popup(self, target, ms):
         self._fade.stop()
         self._fade.setDuration(ms)
-        self._fade.setEasingCurve(QEasingCurve.InOutSine)
+        self._fade.setEasingCurve(QEasingCurve.OutCubic)
         self._fade.setStartValue(self._progress)
         self._fade.setEndValue(target)
         self._fade.start()
@@ -1825,17 +1825,21 @@ class CaptionButton(QAbstractButton):
             p.drawLine(cx + 5, cy - 5, cx - 5, cy + 5)
 
 
+
+# ========== TITLE BAR / NAVBAR (Lines 1828-2051) ==========
 class TitleBar(QWidget):
     """Custom title bar. Transparent at rest; once the page under it is scrolled it shows a blurred,
     darkened copy of the content passing beneath it (like a website navbar)."""
-    BLUR_SCALE, BLUR_RADIUS = 3.0, 12.0  # the blur runs at 1/3 size with a gaussian of this radius (bigger = stronger)
+    BLUR_SCALE, BLUR_RADIUS = 3.0, 18.0  # the blur runs at 1/3 size with a gaussian of this radius (bigger = stronger)
 
+    # ===== INITIALIZATION: Set up title bar layout and icon =====
     def __init__(self, win):
         super().__init__(win)
         self.win = win
         self.blur = None  # (blurred strip, x offset, width, dpr)
         self.cache = None  # blurred levels of the page content around the scroll position
         self.amount = 0.0
+        self.snap_next = False
         self.setFixedHeight(TITLEBAR_H)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -1844,6 +1848,20 @@ class TitleBar(QWidget):
         self.title.setObjectName("h1")
         self.title.setStyleSheet("font-size: 19px; background: transparent;")
         lay.addSpacing(14)
+        icon_widget = QLabel()
+        icon_size = 18
+        icon_widget.setFixedSize(icon_size, icon_size)
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.ico")
+        if os.path.exists(icon_path):
+            dpr = self.win.devicePixelRatioF()
+            px = round(icon_size * dpr)
+            pm = QIcon(icon_path).pixmap(QSize(px, px))
+            if not pm.isNull():
+                pm.setDevicePixelRatio(dpr)
+                icon_widget.setPixmap(pm)
+        icon_widget.setStyleSheet("background: transparent;")
+        lay.addWidget(icon_widget, 0, Qt.AlignVCenter)
+        lay.addSpacing(8)
         lay.addWidget(self.title)
         lay.addStretch()
         self.soft = None
@@ -1865,8 +1883,12 @@ class TitleBar(QWidget):
         self.dirty.setInterval(24)
         self.dirty.timeout.connect(self.refresh)
 
-    def schedule(self):
+    def schedule(self, instant=False):
         self.cache = None  # content, size or page changed: re-blur from scratch
+        if instant:
+            self.snap_next = True
+            self.refresh()
+            return
         if not self.dirty.isActive():
             self.dirty.start()
 
@@ -1969,6 +1991,7 @@ class TitleBar(QWidget):
             rows.append((s ** 0.5, int(TINT * s)))
         return rows
 
+    # ===== COMPOSE_BLUR: Render blurred content with fade gradient =====
     def compose_blur(self, c, value):
         """Each row is an opaque mix of the sharp and the blurred content (all blur under the bar, easing back
         to sharp), so it replaces what is underneath instead of glowing on top of it."""
@@ -1993,13 +2016,22 @@ class TitleBar(QWidget):
             p.setCompositionMode(QPainter.CompositionMode_SourceOver)
             p.setOpacity(1.0)
             p.fillRect(QRect(0, py, w, bh), QColor(0, 0, 0, tint))
+        fade_h = min(20, len(c["rows"]) // 4)
+        if fade_h > 0:
+            fade = QLinearGradient(0, len(c["rows"]) - fade_h, 0, len(c["rows"]))
+            fade.setColorAt(0.0, QColor(255, 255, 255, 255))
+            fade.setColorAt(1.0, QColor(255, 255, 255, 0))
+            p.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+            p.fillRect(QRect(0, len(c["rows"]) - fade_h, w, fade_h), fade)
         p.end()
         return out, dpr
 
+    # ===== REFRESH: Calculate blur amount and update cache =====
     def refresh(self):
         page = self.win.current_scroll_area()
         value = page.verticalScrollBar().value() if page is not None else 0
-        target = min(1.0, value / 70.0)  # the blur builds up over the first 70px of scrolling
+        # Blur starts at 40% opacity at top, builds to 100% over 140px scroll
+        target = 0.0 if page is None else min(1.0, 0.4 + value / 140.0)  # min 0.4 blur at top, builds up over scrolling
         if target > 0.0:
             c = self.cache
             zone = TITLEBAR_H + TITLEBAR_SOFT
@@ -2011,19 +2043,19 @@ class TitleBar(QWidget):
                 img, dpr = self.compose_blur(c, value)
                 self.blur = (img, c["x"], c["w"], dpr)
                 self.repaint_all()
-        self._fade_to(target)
+        if self.snap_next:
+            self.snap_next = False
+            self.fade.stop()
+            self.target = self.amount = target
+            self.repaint_all()
+        else:
+            self._fade_to(target)
 
+    # ===== PAINT_EVENT: Draw the blurred title bar =====
     def paintEvent(self, _):
         p = QPainter(self)
         # the sidebar divider starts below the bar instead of being cut off by it
         p.fillRect(QRectF(0, 0, self.win.sidebar.width() + 6, TITLEBAR_H), QColor(0, 0, 0))
-        if not self.blur or self.amount <= 0.0:
-            return
-        img, x, w, dpr = self.blur
-        p.setOpacity(self.amount)
-        full = QRectF(0, 0, self.width(), TITLEBAR_H)
-        p.fillRect(full, QColor(0, 0, 0))  # one solid bar across the sidebar and the page
-        p.drawImage(QRectF(x, 0, w, TITLEBAR_H), img, QRectF(0, 0, img.width(), TITLEBAR_H * dpr))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self.window().windowHandle():
@@ -2034,6 +2066,8 @@ class TitleBar(QWidget):
             self.toggle_max()
 
 
+
+# ========== SOFT EDGE FADE ZONE (Lines 2054+) ==========
 class SoftEdge(QWidget):
     """Blur that keeps going below the title bar and fades out gradually, so the bar has no hard edge."""
 
@@ -2053,8 +2087,8 @@ class SoftEdge(QWidget):
             return
         img, x, w, dpr = b.blur
         p.setOpacity(b.amount)
-        p.drawImage(QRectF(x, 0, w, self.height()), img,
-                    QRectF(0, TITLEBAR_H * dpr, img.width(), self.height() * dpr))
+        p.drawImage(QRectF(x, 0, w, self.height()), img, QRectF(0, 0, img.width(), img.height()))
+
 
 
 class EdgeGrip(QWidget):
@@ -2084,6 +2118,9 @@ class SideGrip(QWidget):
         if e.buttons() & Qt.LeftButton:
             x = self.side.mapFromGlobal(e.globalPosition().toPoint()).x()
             self.side.setFixedWidth(max(self.MIN, min(self.MAX, x)))
+            win = self.side.window()
+            if hasattr(win, "titlebar"):
+                win.titlebar.schedule()
 
 
 class Kernel(QWidget):
@@ -2334,7 +2371,7 @@ class Kernel(QWidget):
         self.pill.move(w - 24 - self.pill.width(), 20 + shift)
         if hasattr(self, "titlebar"):
             self.titlebar.setGeometry(0, 0, w, TITLEBAR_H)
-            self.softedge.setGeometry(0, TITLEBAR_H, w, TITLEBAR_SOFT)
+            self.softedge.setGeometry(0, 0, w, TITLEBAR_H + TITLEBAR_SOFT)
             t, c = 4, 8
             full = not (self.isMaximized() or self.isFullScreen())
             geo = [(0, c, t, h - 2 * c), (w - t, c, t, h - 2 * c), (c, 0, w - 2 * c - CAPTION_W, t),
@@ -2434,7 +2471,7 @@ class Kernel(QWidget):
         self.finish_anim()
         self.stack.setCurrentIndex(index)
         if hasattr(self, "titlebar"):
-            self.titlebar.schedule()
+            self.titlebar.schedule(instant=True)
         if index == GAMING:
             self.refresh_display_status()
         if index == SPECS:
@@ -2447,14 +2484,8 @@ class Kernel(QWidget):
         fade.setDuration(220)
         fade.setStartValue(0.0)
         fade.setEndValue(1.0)
-        slide = QPropertyAnimation(page, b"pos")
-        slide.setDuration(260)
-        slide.setStartValue(QPoint(0, 14))
-        slide.setEndValue(QPoint(0, 0))
-        slide.setEasingCurve(QEasingCurve.OutCubic)
         group = QParallelAnimationGroup(self)
         group.addAnimation(fade)
-        group.addAnimation(slide)
         group.finished.connect(self.finish_anim)
         self.anim, self.anim_page = group, page
         group.start()
@@ -2467,7 +2498,6 @@ class Kernel(QWidget):
         group.stop()
         if isValid(page):
             page.setGraphicsEffect(None)
-            page.move(0, 0)
 
     # ---- icons ----
 
@@ -3252,7 +3282,7 @@ class Kernel(QWidget):
 
     def build_apps(self):
         page = Page("Applications")
-        page.col.setContentsMargins(0, 28, 0, 120)
+        page.col.setContentsMargins(0, 28 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 120)
         page.col.addSpacing(16)
         self.search_box = QLineEdit()
         self.search_box.setObjectName("search")
@@ -3406,7 +3436,7 @@ class Kernel(QWidget):
     def build_activity(self):
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setContentsMargins(20, 28, 20, 28)
+        pl.setContentsMargins(20, 28 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 20, 28)
         t = QLabel("Activity")
         t.setObjectName("title")
         pl.addWidget(t)
