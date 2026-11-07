@@ -17,7 +17,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QIcon, QImage, QLinearGradient,
-    QPainter, QPainterPath, QPen, QPixmap, QRadialGradient,
+    QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsEffect,
@@ -40,6 +40,9 @@ BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
 TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 76, 8, 24
+TINT = 130  # darkness (0-255) of the title bar blur
+BAND = 2  # rows blended per step when composing the progressive blur
+CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
 CATEGORY_COLORS = {"Apps": "#5b9cff", "Games": "#b57bff", "Documents & files": "#4fd08a",
                    "System": "#ffb454", "Other": "#8a8a8a"}
 
@@ -1825,12 +1828,13 @@ class CaptionButton(QAbstractButton):
 class TitleBar(QWidget):
     """Custom title bar. Transparent at rest; once the page under it is scrolled it shows a blurred,
     darkened copy of the content passing beneath it (like a website navbar)."""
-    BLUR_RADII = (0.5, 1.0, 1.7, 2.5, 3.4)  # blur levels at quarter resolution (last = under the bar)
+    BLUR_SCALE, BLUR_RADIUS = 3.0, 12.0  # the blur runs at 1/3 size with a gaussian of this radius (bigger = stronger)
 
     def __init__(self, win):
         super().__init__(win)
         self.win = win
-        self.blur = None  # (blurred strip, x offset, width)
+        self.blur = None  # (blurred strip, x offset, width, dpr)
+        self.cache = None  # blurred levels of the page content around the scroll position
         self.amount = 0.0
         self.setFixedHeight(TITLEBAR_H)
         lay = QHBoxLayout(self)
@@ -1862,6 +1866,7 @@ class TitleBar(QWidget):
         self.dirty.timeout.connect(self.refresh)
 
     def schedule(self):
+        self.cache = None  # content, size or page changed: re-blur from scratch
         if not self.dirty.isActive():
             self.dirty.start()
 
@@ -1896,18 +1901,21 @@ class TitleBar(QWidget):
         self.fade.start()
 
     @staticmethod
-    def _blur_small(img, radius):
-        """Gaussian-style blur of a small image; the edges are padded so they do not fade to transparent."""
-        pad = int(radius * 2) + 2
+    def _blur_levels(img, scale, radius):
+        """[img, blurred img]. The blur is a true gaussian run on a copy shrunk by `scale` (cheap), padded with
+        replicated edges so the borders stay opaque, then scaled back up in two smooth steps (no blocky pixels)."""
         w, h = img.width(), img.height()
-        big = QImage(w + 2 * pad, h + 2 * pad, QImage.Format_ARGB32_Premultiplied)
-        big.fill(Qt.transparent)
+        sw, sh = max(int(w / scale), 1), max(int(h / scale), 1)
+        small = img.scaled(sw, sh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        pad = int(radius * 2.5) + 2
+        big = QImage(sw + 2 * pad, sh + 2 * pad, QImage.Format_ARGB32_Premultiplied)
         p = QPainter(big)
-        p.drawImage(pad, pad, img)
-        p.drawImage(QRect(pad, 0, w, pad), img, QRect(0, 0, w, 1))
-        p.drawImage(QRect(pad, pad + h, w, pad), img, QRect(0, h - 1, w, 1))
-        p.drawImage(QRect(0, 0, pad, h + 2 * pad), big, QRect(pad, 0, 1, h + 2 * pad))
-        p.drawImage(QRect(pad + w, 0, pad, h + 2 * pad), big, QRect(pad + w - 1, 0, 1, h + 2 * pad))
+        p.drawImage(QRect(0, 0, big.width(), big.height()), small, QRect(0, 0, sw, sh))  # background, replaced below
+        p.drawImage(pad, pad, small)
+        p.drawImage(QRect(pad, 0, sw, pad), small, QRect(0, 0, sw, 1))
+        p.drawImage(QRect(pad, pad + sh, sw, pad), small, QRect(0, sh - 1, sw, 1))
+        p.drawImage(QRect(0, 0, pad, big.height()), big, QRect(pad, 0, 1, big.height()))
+        p.drawImage(QRect(pad + sw, 0, pad, big.height()), big, QRect(pad + sw - 1, 0, 1, big.height()))
         p.end()
         scene = QGraphicsScene()
         item = QGraphicsPixmapItem(QPixmap.fromImage(big))
@@ -1921,42 +1929,70 @@ class TitleBar(QWidget):
         q = QPainter(out)
         scene.render(q, QRectF(out.rect()), QRectF(big.rect()))
         q.end()
-        return out.copy(pad, pad, w, h)
+        soft = out.copy(pad, pad, sw, sh)
+        mid = soft.scaled(max(int(w / math.sqrt(scale)), 1), max(int(h / math.sqrt(scale)), 1),
+                          Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        return [img, mid.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)]
 
-    def compose_blur(self, strip):
-        """Progressive blur: the strongest blur (unreadable) under the bar, then the blur strength and
-        opacity ease down to nothing over a long fade zone, by blending increasingly blurred copies row by row."""
-        dpr = strip.devicePixelRatio() or 1.0
-        fmt = QImage.Format_ARGB32_Premultiplied
-        img = strip.toImage().convertToFormat(fmt)
+    def build_cache(self, page, value):
+        """Blur a window of the page content around the scroll position once; scrolling inside that window
+        then only blends rows (no re-grab, no re-blur), so the bar stays in step with the page."""
+        content = page.widget()
+        dpr = self.win.devicePixelRatioF()
+        zone = TITLEBAR_H + TITLEBAR_SOFT
+        top = max(0, value - CACHE_MARGIN)
+        height = min(content.height() - top, zone + 2 * CACHE_MARGIN + (value - top))
+        if height <= 0 or content.width() <= 0:
+            return None
+        w, h = int(round(content.width() * dpr)), int(round(height * dpr))
+        img = QImage(w, h, QImage.Format_ARGB32_Premultiplied)
+        img.fill(QColor(BG))  # the content itself is transparent; the page background is solid
+        img.setDevicePixelRatio(dpr)
+        p = QPainter(img)
+        content.render(p, QPoint(0, 0), QRegion(0, top, content.width(), height))
+        p.end()
         img.setDevicePixelRatio(1.0)
-        w, h = img.width(), img.height()
-        small = img.scaled(max(w // 4, 1), max(h // 4, 1), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        levels = [img] + [self._blur_small(small, r).scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-                          .convertToFormat(fmt) for r in self.BLUR_RADII]
-        n = len(levels) - 1
-        zone = min(h, int(round((TITLEBAR_H + TITLEBAR_SOFT) * dpr)))
-        out = QImage(w, zone, fmt)
-        out.fill(Qt.transparent)
-        p = QPainter(out)
+        levels = self._blur_levels(img, self.BLUR_SCALE * dpr, self.BLUR_RADIUS)
+        return {"page": page, "top": top, "height": height, "dpr": dpr, "levels": levels,
+                "x": page.viewport().mapTo(self.win, QPoint(0, 0)).x(), "w": content.width(),
+                "rows": self.row_weights(dpr)}
+
+    @staticmethod
+    def row_weights(dpr):
+        """Per row of the bar and its fade zone: (how much of the row is the blurred copy, dark tint)."""
+        zone = int(round((TITLEBAR_H + TITLEBAR_SOFT) * dpr))
         hold_end = TITLEBAR_H + SOFT_HOLD
+        rows = []
         for py in range(zone):
             t = min(1.0, max(0.0, (py / dpr - hold_end) / (TITLEBAR_SOFT - SOFT_HOLD)))
             s = 1.0 - t * t * (3.0 - 2.0 * t)  # smoothstep: 1 under the bar, 0 at the end of the fade
-            pos = s * n
-            lo = min(int(pos), n - 1)
-            f = pos - lo
-            alpha = s ** 0.5
-            row = QRect(0, py, w, 1)
+            rows.append((s ** 0.5, int(TINT * s)))
+        return rows
+
+    def compose_blur(self, c, value):
+        """Each row is an opaque mix of the sharp and the blurred content (all blur under the bar, easing back
+        to sharp), so it replaces what is underneath instead of glowing on top of it."""
+        dpr, (sharp, soft) = c["dpr"], c["levels"]
+        w = sharp.width()
+        off = int(round((value - c["top"]) * dpr))
+        out = QImage(w, len(c["rows"]), QImage.Format_ARGB32_Premultiplied)
+        out.fill(Qt.transparent)
+        p = QPainter(out)
+        rows, last = c["rows"], sharp.height()
+        for py in range(0, len(rows), BAND):  # blend in thin bands, not single rows: half the draw calls
+            mix, tint = rows[py]
+            bh = min(BAND, len(rows) - py, last - (off + py))
+            if bh <= 0:
+                continue
+            sy = off + py
             p.setCompositionMode(QPainter.CompositionMode_Plus)
-            p.setOpacity(alpha * (1.0 - f))
-            p.drawImage(row, levels[lo], row)
-            if f > 0.004:
-                p.setOpacity(alpha * f)
-                p.drawImage(row, levels[lo + 1], row)
+            p.setOpacity(1.0 - mix)
+            p.drawImage(0, py, sharp, 0, sy, w, bh)
+            p.setOpacity(mix)
+            p.drawImage(0, py, soft, 0, sy, w, bh)
             p.setCompositionMode(QPainter.CompositionMode_SourceOver)
             p.setOpacity(1.0)
-            p.fillRect(row, QColor(0, 0, 0, int(95 * s)))
+            p.fillRect(QRect(0, py, w, bh), QColor(0, 0, 0, tint))
         p.end()
         return out, dpr
 
@@ -1965,10 +2001,15 @@ class TitleBar(QWidget):
         value = page.verticalScrollBar().value() if page is not None else 0
         target = min(1.0, value / 70.0)  # the blur builds up over the first 70px of scrolling
         if target > 0.0:
-            strip = page.grab(QRect(0, 0, page.width(), TITLEBAR_H + TITLEBAR_SOFT + 24))
-            if not strip.isNull():
-                img, dpr = self.compose_blur(strip)
-                self.blur = (img, page.mapTo(self.win, QPoint(0, 0)).x(), page.width(), dpr)
+            c = self.cache
+            zone = TITLEBAR_H + TITLEBAR_SOFT
+            if (c is None or c["page"] is not page or c["dpr"] != self.win.devicePixelRatioF()
+                    or value < c["top"] or (value + zone > c["top"] + c["height"]
+                                            and c["top"] + c["height"] < page.widget().height())):
+                c = self.cache = self.build_cache(page, value)
+            if c is not None:
+                img, dpr = self.compose_blur(c, value)
+                self.blur = (img, c["x"], c["w"], dpr)
                 self.repaint_all()
         self._fade_to(target)
 
@@ -2229,7 +2270,7 @@ class Kernel(QWidget):
             for i in range(self.stack.count()):
                 w = self.stack.widget(i)
                 for sa in ([w] if isinstance(w, QScrollArea) else w.findChildren(QScrollArea)):
-                    sa.verticalScrollBar().valueChanged.connect(self.titlebar.schedule)
+                    sa.verticalScrollBar().valueChanged.connect(self.titlebar.refresh)
             self.grips = [
                 EdgeGrip(self, Qt.LeftEdge, Qt.SizeHorCursor), EdgeGrip(self, Qt.RightEdge, Qt.SizeHorCursor),
                 EdgeGrip(self, Qt.TopEdge, Qt.SizeVerCursor), EdgeGrip(self, Qt.BottomEdge, Qt.SizeVerCursor),
