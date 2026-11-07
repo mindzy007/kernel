@@ -2593,7 +2593,7 @@ class Kernel(QWidget):
         self.display_status = QLabel("")
         self.display_status.setObjectName("muted")
         self.display_status.setWordWrap(True)
-        self.display_status.setContentsMargins(16, 0, 16, 0)
+        self.display_status.setContentsMargins(16, 10, 16, 14)
         page.col.addWidget(self.display_status)
 
         def make_input():
