@@ -3682,6 +3682,7 @@ class Kernel(QWidget):
     def build_storage(self):
         page = Page("Storage")
         header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 16, 0)  # rows keep 16px inside their edge: Rescan lines up with their buttons
         page.col.addSpacing(26)
         label = QLabel("Drives")
         label.setObjectName("section")
@@ -3862,6 +3863,7 @@ class Kernel(QWidget):
         u.clicked.connect(lambda _=False, a=app, b=u: self.uninstall_app(a, b))
         row.right.addWidget(bar)
         row.right.addWidget(sz)
+        row.right.addSpacing(14)  # moves the size left, leaving the button more room
         row.right.addWidget(u)
         return row
 
