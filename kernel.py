@@ -1660,6 +1660,7 @@ class SearchDock(QWidget):
         self.focus_anim.setEasingCurve(curve)
         self.focus_anim.valueChanged.connect(self._set_focus)
         self._hover, self._hvel, self._htarget, self._hlast, self._hfresh = 0.0, 0.0, 0.0, 0.0, False
+        self._hgoal = 0.0  # the smoothed hover decision the spring follows
         self.hover_timer = QTimer(self)  # hover scale chases its target (no bounce), keeping its momentum
         self.hover_timer.setTimerType(Qt.PreciseTimer)
         self.hover_timer.timeout.connect(self.hover_step)
@@ -1752,9 +1753,7 @@ class SearchDock(QWidget):
         self.update()
 
     def animate_hover(self, hovered):
-        """Set the hover target. A critically damped follower, not a fixed-length tween: entering and
-        leaving in quick succession just redirects it, so it never stalls or restarts from zero."""
-        self._htarget = 1.0 if hovered else 0.0
+        """Enter/leave events only wake the follower; it reads the cursor itself (see hover_step)."""
         if not self.hover_timer.isActive():
             hz = self.screen().refreshRate() if self.screen() else 60.0  # tick at the display's rate
             self.hover_timer.setInterval(max(4, int(1000 / max(hz, 30.0)) - 1))
@@ -1762,23 +1761,34 @@ class SearchDock(QWidget):
             self.hover_timer.start()
 
     def hover_step(self):
+        """Hover is decided by where the cursor is (with a 10px margin, so the dock growing under the cursor
+        can never flicker enter/leave), the decision is low-pass filtered, and the size follows the filtered value
+        on a critically damped spring. Hovering in and out a lot therefore just bends one smooth curve."""
         now = time.monotonic()
         if self._hfresh:  # first tick only starts the clock
             self._hfresh, self._hlast = False, now
             return
         dt = min(now - self._hlast, 1 / 30)
         self._hlast = now
+        inside = self.isVisible() and self.rect().adjusted(-10, -10, 10, 10).contains(
+            self.mapFromGlobal(QCursor.pos()))
+        self._htarget = 1.0 if inside else 0.0
+        self._hgoal += (self._htarget - self._hgoal) * (1 - math.exp(-dt / 0.06))
+        before = self._hover
         steps = int(dt / 0.004) + 1
         h = dt / steps
-        w = 24.0  # stiffness: settles in about a quarter of a second
+        w = 22.0  # spring stiffness
         for _ in range(steps):
-            self._hvel += (-w * w * (self._hover - self._htarget) - 2 * w * self._hvel) * h  # damping ratio 1
+            self._hvel += (-w * w * (self._hover - self._hgoal) - 2 * w * self._hvel) * h  # damping ratio 1
             self._hover += self._hvel * h
-        if abs(self._hover - self._htarget) < 0.0005 and abs(self._hvel) < 0.01:
-            self._hover, self._hvel = self._htarget, 0.0
-            self.hover_timer.stop()
-        self.update_geometry()
-        self.update()
+        if (abs(self._hover - self._hgoal) < 0.0005 and abs(self._hvel) < 0.01
+                and abs(self._hgoal - self._htarget) < 0.0005):
+            self._hover, self._hgoal, self._hvel = self._htarget, self._htarget, 0.0
+            if not inside:
+                self.hover_timer.stop()  # at rest and the cursor is away: nothing to watch
+        if self._hover != before:
+            self.update_geometry()
+            self.update()
 
     def enterEvent(self, e):
         self.animate_hover(True)
@@ -1809,8 +1819,8 @@ class SearchDock(QWidget):
         room = max(0, self.parentWidget().width() - self._base_rect.width() - 16)  # never wider than the window
         amount = self.HOVER_SCALE * self._hover  # only hovering scales the dock; focusing no longer does
         grow = min(0.04 * self._base_rect.width(), self.MAX_GROW, room) * amount
-        width = round(self._base_rect.width() + grow)
-        height = round(self._base_rect.height() * (1.0 + self.GROW_H * amount))
+        width = int(round((self._base_rect.width() + grow) / 2.0)) * 2  # even sizes keep the centre on a whole
+        height = int(round(self._base_rect.height() * (1.0 + self.GROW_H * amount) / 2.0)) * 2  # pixel: no 1px jitter
         center = self._base_rect.center()
         self.setGeometry(QRect(center.x() - width // 2, center.y() - height // 2, width, height))
         self.edit.setGeometry(self.rect())
