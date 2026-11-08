@@ -3054,11 +3054,11 @@ class Kernel(QWidget):
         w, h = self.width(), self.height()
         self.overlay.setGeometry(0, 0, w, h)
         pw = min(520, w - 48)
-        ph = min(600, h - 110)
+        ph = min(600, h - 137)
         shift = TITLEBAR_H - 16 if hasattr(self, "titlebar") else 0
-        self.overlay.panel.setGeometry(w - 24 - pw, 76 + shift, pw, ph)
+        self.overlay.panel.setGeometry(w - 36 - pw, 103 + shift, pw, ph)
         self.pill.adjustSize()
-        self.pill.move(w - 24 - self.pill.width(), 20 + shift)
+        self.pill.move(w - 36 - self.pill.width(), 47 + shift)
         if hasattr(self, "titlebar"):
             self.titlebar.setGeometry(0, 0, w, TITLEBAR_H)
             self.softedge.setGeometry(0, 0, w, TITLEBAR_H + TITLEBAR_SOFT)
