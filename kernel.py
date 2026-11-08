@@ -1028,8 +1028,12 @@ class TaskRow(Row):
             self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
             self.revert.clicked.connect(on_revert)
             self.right.addWidget(self.revert)
-        if self.apply is not None and self.revert is None:
-            self.right.insertSpacing(0, ROW_ACTION_BUTTON_WIDTH + self.right.spacing())
+        if self.apply is not None and self.revert is None:  # nothing to undo: keep Revert in its place, disabled
+            self.revert = Button("Revert")
+            self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
+            self.revert.setEnabled(False)
+            self.reversible = False
+            self.right.addWidget(self.revert)
         self.toggle = None
         if on_apply is None:  # a row without an Apply button (Settings) is controlled by its switch
             self.toggle = Toggle()
@@ -1053,8 +1057,11 @@ class RunRow(Row):
         self.b.setCursor(Qt.PointingHandCursor)
         self.b.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.b.clicked.connect(on_run)
-        self.right.addWidget(self.b)
-        self.right.insertSpacing(0, ROW_ACTION_BUTTON_WIDTH + self.right.spacing())
+        self.right.addWidget(self.b)  # Run sits where Apply normally does
+        self.revert = Button("Revert")  # single-use actions can't be undone: Revert stays in its place, disabled
+        self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
+        self.revert.setEnabled(False)
+        self.right.addWidget(self.revert)
         self.set_active(active)
 
     def set_active(self, active):
@@ -2082,6 +2089,11 @@ class FluentCombo(QComboBox):
         self.a_caret = QVariantAnimation(self)
         self.a_caret.setEasingCurve(QEasingCurve.InOutCubic)
         self.a_caret.valueChanged.connect(self._set_caret)
+        self._text_alpha = 1.0  # the shown choice fades in when the user picks a new one
+        self.a_text = QVariantAnimation(self)
+        self.a_text.setEasingCurve(QEasingCurve.OutCubic)
+        self.a_text.valueChanged.connect(self._set_text_alpha)
+        self.activated.connect(lambda _i: self.fade_in_text())
         self.setMouseTracking(True)
         self.installEventFilter(self)
 
@@ -2113,6 +2125,17 @@ class FluentCombo(QComboBox):
         self.update()
 
     cursorPosition = Property(QPointF, get_cursor_position, set_cursor_position)
+
+    def _set_text_alpha(self, v):
+        self._text_alpha = float(v)
+        self.update()
+
+    def fade_in_text(self):
+        self.a_text.stop()
+        self.a_text.setStartValue(0.0)
+        self.a_text.setEndValue(1.0)
+        self.a_text.setDuration(260)
+        self.a_text.start()
 
     def _set_caret(self, v):
         self._caret = float(v)
@@ -2234,10 +2257,22 @@ class FluentCombo(QComboBox):
         p.setPen(QPen(QColor(255, 255, 255, 22), 1))
         p.drawPath(edge)
         p.end()
-        super().paintEvent(e)
         h = self._hover
         p = QPainter(self)
         p.setRenderHint(QPainter.TextAntialiasing)
+        # the chosen option, drawn here (not by Qt) so it can fade in; same font and rendering as the rest of the app
+        tf = QFont(QApplication.font())
+        tf.setFamily(self.font().family())
+        tf.setWeight(self.font().weight())
+        tf.setPixelSize(15)
+        tf.setStyleStrategy(QFont.PreferAntialias | QFont.NoSubpixelAntialias)
+        tf.setHintingPreference(QFont.PreferNoHinting)
+        p.setFont(tf)
+        p.setPen(QColor(TEXT))
+        p.setOpacity(self._text_alpha)
+        shown = QFontMetrics(tf).elidedText(self.currentText(), Qt.ElideRight, max(0, self.width() - 18 - 34))
+        p.drawText(QRectF(18, 0, max(0, self.width() - 18 - 34), self.height()), Qt.AlignVCenter | Qt.AlignLeft, shown)
+        p.setOpacity(1.0)
         f = QFont("Segoe Fluent Icons")
         f.setPixelSize(12)
         p.setFont(f)
