@@ -131,6 +131,7 @@ class Config:
         self.applied = {}
         self.smooth_scroll = True
         self.cpu_temp_mode = "average"
+        self.caption_style = "windows"
         self.accent = ACCENTS[0][1]
         self.nvidia_displays = {}
         self.legacy_display = None
@@ -154,6 +155,8 @@ class Config:
             self.smooth_scroll = d["smooth_scroll"]
         if d.get("cpu_temp_mode") in ("average", "per_core"):
             self.cpu_temp_mode = d["cpu_temp_mode"]
+        if d.get("caption_style") in ("windows", "mac"):
+            self.caption_style = d["caption_style"]
         if isinstance(d.get("accent"), str) and d["accent"].lower() in [c for _, c in ACCENTS]:
             self.accent = d["accent"].lower()
         gamma_ok = lambda g: type(g) is int and 40 <= g <= 280
@@ -181,6 +184,7 @@ class Config:
                            "smooth_scroll": self.smooth_scroll,
                            "cpu_temp_mode": self.cpu_temp_mode,
                            "accent": self.accent,
+                           "caption_style": self.caption_style,
                            "nvidia_displays": self.nvidia_displays,
                            "window": self.win_size}, f, indent=2)
             return True
@@ -1636,7 +1640,7 @@ class ClearButton(QAbstractButton):
 
 class SearchDock(QWidget):
     """Search field pinned over the bottom of a scrolling page, frosted over whatever scrolls behind it."""
-    H, GAP = 60, 22
+    H, GAP = 60, 37
     MAX_GROW = 28  # px of extra width when focused
     GROW_H = 0.05  # extra height at full scale (fraction)
     HOVER_SCALE = 0.65  # how much of the full grow a hover reaches
@@ -2329,12 +2333,18 @@ class CaptionButton(QAbstractButton):
         super().__init__(parent)
         self.kind = kind
         self.hv = 0.0
+        self.style_name = "windows"
         self.setFixedSize(46, TITLEBAR_H)
         self.setFocusPolicy(Qt.NoFocus)
         self.fade = QVariantAnimation(self)
         self.fade.setDuration(160)
         self.fade.setEasingCurve(QEasingCurve.OutCubic)
         self.fade.valueChanged.connect(self._set_hover)
+
+    def set_style(self, name):
+        self.style_name = name
+        self.setFixedSize(34 if name == "mac" else 46, TITLEBAR_H)
+        self.update()
 
     def _set_hover(self, v):
         self.hv = float(v)
@@ -2346,15 +2356,50 @@ class CaptionButton(QAbstractButton):
         self.fade.setEndValue(end)
         self.fade.start()
 
+    def _group(self):
+        return [self] + (list(getattr(self, "peers", [])) if self.style_name == "mac" else [])
+
     def enterEvent(self, e):
-        self._go(1.0)
+        for b in self._group():
+            b._go(1.0)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self._go(0.0)
+        for b in self._group():
+            b._go(0.0)
         super().leaveEvent(e)
 
+    def paint_mac(self):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        base, ink = {"min": ((254, 188, 46), (110, 66, 0)), "max": ((40, 200, 64), (0, 80, 8)),
+                     "restore": ((40, 200, 64), (0, 80, 8)), "close": ((255, 95, 87), (95, 0, 0))}[self.kind]
+        if self.isDown():
+            base = tuple(int(c * 0.78) for c in base)
+        c = QPointF(self.width() / 2.0, self.height() / 2.0)
+        r = 8.0
+        p.setPen(QPen(QColor(0, 0, 0, 55), 0.8))  # thin darker rim, like the real thing
+        p.setBrush(QColor(*base))
+        p.drawEllipse(c, r - 0.4, r - 0.4)
+        if self.hv > 0.01:  # glyph fades in on hover (all three together, like macOS)
+            pen = QPen(QColor(ink[0], ink[1], ink[2], int(255 * self.hv)), 1.7)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            if self.kind == "close":
+                d = 3.1
+                p.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
+                p.drawLine(QPointF(c.x() + d, c.y() - d), QPointF(c.x() - d, c.y() + d))
+            elif self.kind == "min":
+                p.drawLine(QPointF(c.x() - 3.7, c.y()), QPointF(c.x() + 3.7, c.y()))
+            else:
+                p.drawLine(QPointF(c.x() - 3.7, c.y()), QPointF(c.x() + 3.7, c.y()))
+                p.drawLine(QPointF(c.x(), c.y() - 3.7), QPointF(c.x(), c.y() + 3.7))
+
     def paintEvent(self, _):
+        if self.style_name == "mac":
+            return self.paint_mac()
         p = QPainter(self)
         close = self.kind == "close"
         fill = QColor(196, 43, 28, int(255 * self.hv)) if close else QColor(255, 255, 255, int(24 * self.hv))
@@ -2425,6 +2470,12 @@ class TitleBar(QWidget):
         self.b_close = CaptionButton("close", self)
         for b in (self.b_min, self.b_max, self.b_close):
             lay.addWidget(b)
+        for b in (self.b_min, self.b_max, self.b_close):
+            b.peers = [o for o in (self.b_min, self.b_max, self.b_close) if o is not b]
+        self.cap_pad = QWidget(self)
+        self.cap_pad.setFixedSize(0, TITLEBAR_H)
+        lay.addWidget(self.cap_pad)
+        self.set_caption_style(getattr(win.cfg, "caption_style", "windows"))
         self.b_min.clicked.connect(win.showMinimized)
         self.b_max.clicked.connect(self.toggle_max)
         self.b_close.clicked.connect(win.close)
@@ -2448,6 +2499,19 @@ class TitleBar(QWidget):
             self.dirty.start(110)
         elif not self.dirty.isActive():
             self.dirty.start(24)
+
+    def set_caption_style(self, name):
+        for b in (self.b_min, self.b_max, self.b_close):
+            b.set_style(name)
+        self.cap_pad.setFixedWidth(3 if name == "mac" else 0)
+        lay = self.layout()
+        order = (self.b_max, self.b_min, self.b_close) if name == "mac" else (self.b_min, self.b_max, self.b_close)
+        for b in order:
+            lay.removeWidget(b)
+        idx = lay.indexOf(self.cap_pad)  # buttons always go right before the pad (index of a removed button drifted)
+        for i, b in enumerate(order):
+            lay.insertWidget(idx + i, b)
+        self.update()
 
     def toggle_max(self):
         self.win.showNormal() if self.win.isMaximized() else self.win.showMaximized()
@@ -3027,7 +3091,7 @@ class Kernel(QWidget):
 
     def refresh_pill_backdrop(self):
         if (not self.pill.isVisible() or not self.isActiveWindow() or self.overlay.isVisible()
-                or self.fade or self.pill.isDown() or WindowState.moving):
+                or self.fade or self.anim or self.pill.isDown() or WindowState.moving):
             return
         g = self.pill.geometry()
         cur = self.stack.currentWidget()
@@ -3161,6 +3225,8 @@ class Kernel(QWidget):
         if index == self.stack.currentIndex():
             return
         self.finish_anim()
+        self.pill.backdrop = None  # old page's blur would flash under the fade
+        self.pill.update()
         self.stack.setCurrentIndex(index)
         if hasattr(self, "titlebar"):
             self.titlebar.schedule(instant=True)
@@ -3192,6 +3258,7 @@ class Kernel(QWidget):
         group.stop()
         if isValid(page):
             page.setGraphicsEffect(None)
+        QTimer.singleShot(0, self.refresh_pill_backdrop)
 
     # ---- icons ----
 
@@ -4489,6 +4556,14 @@ class Kernel(QWidget):
         self.cpu_temp_combo.currentIndexChanged.connect(lambda: self.set_cpu_temp_mode())
         temp.right.addWidget(self.cpu_temp_combo)
         page.add(temp)
+        caption = Row("Window buttons", "Minimize, maximize and close: Windows or macOS style")
+        self.caption_combo = FluentCombo()
+        self.caption_combo.addItem("Windows", "windows")
+        self.caption_combo.addItem("macOS", "mac")
+        self.caption_combo.setCurrentIndex(self.caption_combo.findData(self.cfg.caption_style))
+        self.caption_combo.currentIndexChanged.connect(lambda: self.set_caption_style())
+        caption.right.addWidget(self.caption_combo)
+        page.add(caption)
         accent = Row("Accent color", "Color of the selection pill in the sidebar")
         self.accent_swatches = ColorSwatches(ACCENTS, self.cfg.accent)
         self.accent_swatches.changed.connect(self.set_accent)
@@ -4714,6 +4789,12 @@ class Kernel(QWidget):
         self.cfg.accent = color
         self.sidebar.set_accent(color)
         self.cfg.save()
+
+    def set_caption_style(self):
+        self.cfg.caption_style = self.caption_combo.currentData()
+        self.cfg.save()
+        if hasattr(self, "titlebar"):
+            self.titlebar.set_caption_style(self.cfg.caption_style)
 
     def set_smooth(self, on):
         SmoothScroller.on = on
