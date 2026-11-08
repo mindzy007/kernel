@@ -2722,13 +2722,18 @@ class Sidebar(QFrame):
         if goal[0] != self.goal[0]:
             down = goal[0] > self.edges[0]
             self.lead_k = 1 if down else 0  # moving down: the bottom edge leads
-            self.omega = (24.0, 40.0) if down else (40.0, 24.0)
+            self.omega = (31.0, 52.0) if down else (52.0, 31.0)  # the leading edge is stiffer: it stretches, then settles
         self.goal = goal
         if not self.timer.isActive():
             hz = self.screen().refreshRate() if self.screen() else 60.0  # tick at the display's rate
             self.timer.setInterval(max(4, int(1000 / max(hz, 30.0)) - 1))
-            self.fresh = True  # the first tick only starts the clock: the page switch just blocked the UI
+            self.fresh = False
+            self.last = time.monotonic() - 1 / 60
             self.timer.start()
+        # Move and paint the first frame right now, inside the click, so the pill reacts instantly instead of
+        # waiting for the page switch (which blocks the UI for a moment) to finish.
+        self.tick()
+        self.repaint()
 
     def tick(self):
         now = time.monotonic()
@@ -2741,12 +2746,18 @@ class Sidebar(QFrame):
         steps = int(dt / 0.004) + 1
         h = dt / steps
         pos = list(self.edges)
+        lead, trail = self.lead_k, 1 - self.lead_k
+        base = float(self.current.height())
+        wl, wt = 48.0, 38.0  # both critically damped (no wobble); the trailing edge is the softer one
         for _ in range(steps):
-            for k in (0, 1):
-                w = self.omega[k]
-                z = 0.8 if k == self.lead_k else 1.0
-                self.vel[k] += (-w * w * (pos[k] - self.goal[k]) - 2 * z * w * self.vel[k]) * h
-                pos[k] += self.vel[k] * h
+            # the leading edge glides to the new item...
+            self.vel[lead] += (-wl * wl * (pos[lead] - self.goal[lead]) - 2 * wl * self.vel[lead]) * h
+            pos[lead] += self.vel[lead] * h
+            # ...and the trailing edge chases the leading edge (one item behind it), not the destination, so the
+            # stretch grows and shrinks as one continuous motion instead of two separate edges moving
+            follow = pos[lead] - base if trail == 0 else pos[lead] + base
+            self.vel[trail] += (-wt * wt * (pos[trail] - follow) - 2 * wt * self.vel[trail]) * h
+            pos[trail] += self.vel[trail] * h
         if all(abs(pos[k] - self.goal[k]) < 0.05 and abs(self.vel[k]) < 1.0 for k in (0, 1)):
             pos = list(self.goal)
             self.vel = [0.0, 0.0]
@@ -2771,15 +2782,16 @@ class Sidebar(QFrame):
             stretch = max(0.0, h - self.current.height())
             inset = min(3.5, stretch * 0.04)  # jelly squash: the longer it stretches, the slimmer it gets
             r = QRectF(self.current.x() + inset, top, self.current.width() - 2 * inset, h)
+            rc = 10 + min(5.0, stretch * 0.04)  # corners round off a little as it stretches
             body = QPainterPath()
-            body.addRoundedRect(r, 10, 10)
+            body.addRoundedRect(r, rc, rc)
             p.fillPath(body, QColor(10, 10, 10))  # solid, dark
             line = QLinearGradient(0, r.top(), 0, r.bottom())  # hairline border, brighter on top
             line.setColorAt(0.0, QColor(255, 255, 255, 26))
             line.setColorAt(1.0, QColor(255, 255, 255, 8))
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QBrush(line), 1))
-            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rc, rc)
             ph = min(18.0 + stretch * 0.35, r.height() - 8)
             pill = QPainterPath()  # accent pill on the left edge
             pill.addRoundedRect(QRectF(r.left() + 4, r.center().y() - ph / 2, 3, ph), 1.5, 1.5)
@@ -4817,6 +4829,26 @@ class Kernel(QWidget):
         except Exception:
             pass
 
+    def prepolish_pages(self, index=0):
+        """Applying the style sheet to a page's widgets happens the first time it is shown, which is the lag on
+        a page's first visit. Do it ahead of time, one page per idle slice."""
+        if index >= self.stack.count():
+            return
+        page = self.stack.widget(index)
+        for w in [page] + page.findChildren(QWidget):
+            w.ensurePolished()
+        if page.layout() is not None:
+            page.layout().activate()
+        inner = page.widget() if hasattr(page, "widget") else None
+        if inner is not None and inner.layout() is not None:
+            inner.layout().activate()
+        if index != self.stack.currentIndex() and not WindowState.moving:
+            # Paint it once off-screen too: the first paint is what costs (glyph, gradient and image caches
+            # fill up), and doing it now means the first click on that page doesn't stall.
+            page.resize(self.stack.size())
+            page.grab()
+        QTimer.singleShot(120, lambda: self.prepolish_pages(index + 1))
+
     def warm_up(self):
         """Run the blur pipeline once on tiny images so the first maximize doesn't pay its start-up cost."""
         try:
@@ -4830,6 +4862,7 @@ class Kernel(QWidget):
         if not hasattr(self, "_warmed"):
             self._warmed = True
             QTimer.singleShot(700, self.warm_up)
+            QTimer.singleShot(900, self.prepolish_pages)
         if CUSTOM_TITLEBAR:
             try:
                 native_frame(int(self.winId()))
