@@ -17,7 +17,7 @@ from PySide6.QtCore import (
     QPropertyAnimation, QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QFontMetricsF, QIcon, QImage, QLinearGradient,
+    QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QFontMetricsF, QIcon, QTransform, QImage, QLinearGradient,
     QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
 )
 from PySide6.QtWidgets import (
@@ -2016,8 +2016,14 @@ class ComboItemDelegate(QStyledItemDelegate):
                 eased = (1.0 - math.cos(math.pi * s)) / 2.0
                 p.fillPath(path, QColor(255, 255, 255, int(7 * eased)))
                 draw_spotlight(p, path, rect, self.cursor, eased, 105, DROPDOWN_GLOW)
-        font = QFont(option.font)
+        # Start from the application font, not the view's: a style-sheet font drops the app's rendering flags
+        # (grayscale antialiasing, no hinting), which is why this text looked different from everything else.
+        font = QFont(QApplication.font())
+        font.setFamily(option.font.family())
+        font.setWeight(option.font.weight())
         font.setPixelSize(15)
+        font.setStyleStrategy(QFont.PreferAntialias | QFont.NoSubpixelAntialias)
+        font.setHintingPreference(QFont.PreferNoHinting)
         p.setFont(font)
         p.setPen(QColor(TEXT))
         text_rect = rect.adjusted(14, 0, -14, 0)
@@ -2041,15 +2047,17 @@ class ZoomEffect(QGraphicsEffect):
 
     def draw(self, painter):
         offset = QPoint()
-        pm = self.sourcePixmap(Qt.LogicalCoordinates, offset, QGraphicsEffect.NoPad)
-        ratio = pm.devicePixelRatio()
-        anchor = QPointF(offset.x() + pm.width() / ratio / 2,
-                         offset.y() + (pm.height() / ratio if self.from_bottom else 0))
+        # Device pixels, drawn 1:1: the popup is rendered at the screen's real resolution and only resampled
+        # while the zoom is actually animating, so text isn't softened by a scale-by-1.0 pass.
+        pm = self.sourcePixmap(Qt.DeviceCoordinates, offset, QGraphicsEffect.NoPad)
         painter.save()
-        painter.setRenderHints(QPainter.SmoothPixmapTransform | QPainter.Antialiasing)
-        painter.translate(anchor)
-        painter.scale(self.zoom, self.zoom)
-        painter.translate(-anchor)
+        painter.setWorldTransform(QTransform())
+        if self.zoom != 1.0:
+            painter.setRenderHints(QPainter.SmoothPixmapTransform | QPainter.Antialiasing)
+            anchor = QPointF(offset.x() + pm.width() / 2, offset.y() + (pm.height() if self.from_bottom else 0))
+            painter.translate(anchor)
+            painter.scale(self.zoom, self.zoom)
+            painter.translate(-anchor)
         painter.drawPixmap(offset, pm)
         painter.restore()
 
@@ -2070,6 +2078,10 @@ class FluentCombo(QComboBox):
         self.zoom_from_bottom = False
         self.a_hover = QPropertyAnimation(self, b"hoverMix", self)
         self.a_cursor = QPropertyAnimation(self, b"cursorPosition", self)
+        self._caret = 0.0  # 0 = arrow down (closed), 1 = flipped 180 degrees (open)
+        self.a_caret = QVariantAnimation(self)
+        self.a_caret.setEasingCurve(QEasingCurve.InOutCubic)
+        self.a_caret.valueChanged.connect(self._set_caret)
         self.setMouseTracking(True)
         self.installEventFilter(self)
 
@@ -2102,6 +2114,17 @@ class FluentCombo(QComboBox):
 
     cursorPosition = Property(QPointF, get_cursor_position, set_cursor_position)
 
+    def _set_caret(self, v):
+        self._caret = float(v)
+        self.update()
+
+    def animate_caret(self, open_):
+        self.a_caret.stop()
+        self.a_caret.setStartValue(self._caret)
+        self.a_caret.setEndValue(1.0 if open_ else 0.0)
+        self.a_caret.setDuration(300 if open_ else 260)
+        self.a_caret.start()
+
     def glide(self, anim, end, ms, curve):
         anim.stop()
         anim.setDuration(ms)
@@ -2126,12 +2149,14 @@ class FluentCombo(QComboBox):
     def showPopup(self):
         popup = self.view().window()
         self._closing = False
-        self._backdrop.blur = blurred(self.window().grab(), radius=10)
+        self._backdrop.blur = blurred(self.window().grab(), radius=16)
         self._fade.stop()
         self.set_zoom_effects(True)
         self.set_progress(0.0)
         super().showPopup()
         self.zoom_from_bottom = popup.y() < self.mapToGlobal(QPoint(0, 0)).y()  # opened upwards
+        popup.move(popup.x(), popup.y() + (-5 if self.zoom_from_bottom else 5))  # 5px more gap from the box
+        self.animate_caret(True)
         for fx in self._fx:
             fx.from_bottom = self.zoom_from_bottom
         self.set_progress(0.0)
@@ -2143,8 +2168,10 @@ class FluentCombo(QComboBox):
             self._closing = False
             self._fade.stop()
             super().hidePopup()
+            self.animate_caret(False)
             return
         self._closing = True
+        self.animate_caret(False)
         if not self._fx:
             self.set_zoom_effects(True)
             for fx in self._fx:
@@ -2163,7 +2190,9 @@ class FluentCombo(QComboBox):
         if self._closing:
             self._closing = False
             super().hidePopup()
-            self.set_zoom_effects(False)  # kept while open so the text doesn't change rendering mid-way
+            self.set_zoom_effects(False)
+        elif self._progress >= 1.0:
+            self.set_zoom_effects(False)  # fully open: draw the list directly, crisp like all other text
 
     def set_zoom_effects(self, on):
         for widget in (self.view(), self._backdrop):
@@ -2214,7 +2243,13 @@ class FluentCombo(QComboBox):
         p.setFont(f)
         arrow_alpha = int(122 + (200 - 122) * h)
         p.setPen(QColor(arrow_alpha, arrow_alpha, arrow_alpha))
-        p.drawText(self.rect().adjusted(0, 0, -14, 0), Qt.AlignRight | Qt.AlignVCenter, "\uE70D")
+        box = self.rect().adjusted(0, 0, -14, 0)
+        glyph_w = QFontMetricsF(f).horizontalAdvance("\uE70D")
+        centre = QPointF(box.right() + 1 - glyph_w / 2, box.center().y() + 0.5)
+        p.translate(centre)
+        p.rotate(180.0 * self._caret)  # flips over around its own centre as the list opens and closes
+        p.translate(-centre)
+        p.drawText(box, Qt.AlignRight | Qt.AlignVCenter, "\uE70D")
 
 
 class NCCALCSIZE_PARAMS(ctypes.Structure):
