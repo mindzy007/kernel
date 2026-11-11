@@ -1203,8 +1203,18 @@ class Pie3D(QWidget):
                     run.append((x, y))
                     continue
                 if len(run) > 1:
-                    p.drawPolygon(QPolygonF([QPointF(a, b) for a, b in run]
-                                            + [QPointF(a, b + self.DEPTH) for a, b in reversed(run)]))
+                    wall = QPolygonF([QPointF(a, b) for a, b in run]
+                                     + [QPointF(a, b + self.DEPTH) for a, b in reversed(run)])
+                    p.setPen(QPen(QBrush(g), 1))
+                    p.setBrush(QBrush(g))
+                    p.drawPolygon(wall)
+                    top_y = min(b for _, b in run)
+                    shade = QLinearGradient(0, top_y, 0, top_y + self.DEPTH + ry)
+                    shade.setColorAt(0.0, QColor(0, 0, 0, 0))
+                    shade.setColorAt(1.0, QColor(0, 0, 0, 110))
+                    p.setPen(Qt.NoPen)
+                    p.setBrush(QBrush(shade))
+                    p.drawPolygon(wall)
                 run = []
         for i in order:
             f0, f1 = spans[i]
@@ -1218,6 +1228,10 @@ class Pie3D(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(g))
             p.drawPolygon(QPolygonF([QPointF(cx + ox, cy + oy)] + [QPointF(x, y) for x, y, _ in arc]))
+            rim = QPen(QColor(255, 255, 255, 46), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+            p.setPen(rim)
+            p.setBrush(Qt.NoBrush)
+            p.drawPolyline(QPolygonF([QPointF(x, y) for x, y, _ in arc]))
             if len(self.slices) > 1:  # thin soft seams between slices instead of an outline around each one
                 p.setPen(QPen(QColor(10, 10, 12, 150), 1.6, Qt.SolidLine, Qt.RoundCap))
                 p.drawLine(QPointF(cx + ox, cy + oy), QPointF(arc[0][0], arc[0][1]))
@@ -1345,7 +1359,7 @@ class DrivePanel(QWidget):
         a = QLabel(label)
         a.setObjectName("muted")
         b = QLabel(value)
-        b.setStyleSheet(f"font-size: 23px; font-weight: 700; color: {color};")
+        b.setStyleSheet(f"font-size: 23px; font-weight: 600; color: {color};")
         c = QLabel(sub)
         c.setObjectName("muted")
         for w in (a, b, c):
