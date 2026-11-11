@@ -1127,6 +1127,11 @@ class Pie3D(QWidget):
             self.tick.stop()
         self.update()
 
+    def hide_slices(self):
+        self.sweep_anim.stop()
+        self._sweep = 0.0
+        self.update()
+
     def replay(self):
         self.sweep_anim.stop()
         self.sweep_anim.setStartValue(0.0)
@@ -1502,7 +1507,7 @@ class DriveItem(QWidget):
         frame or two this drive's row was handed the slack and stretched (its text jumped around).
         Flushing the pending layout requests now keeps every row exactly where it belongs each frame."""
         self.wrap.setFixedHeight(int(v))
-        for _ in range(4):
+        for _ in range(2):
             QApplication.sendPostedEvents(None, QEvent.LayoutRequest)
 
     def sync(self):
@@ -1530,20 +1535,30 @@ class DriveItem(QWidget):
                 win.refresh_pill_backdrop()
 
     def toggle(self):
-        self.is_open = not self.is_open
-        self.chevron.set_open(self.is_open)
+        self.set_open(not self.is_open)
+
+    def set_open(self, on):
+        if on == self.is_open:
+            return
+        self.is_open = on
+        if on:  # one drive open at a time
+            parent = self.parentWidget()
+            for other in (parent.findChildren(DriveItem) if parent else []):
+                if other is not self and other.is_open:
+                    other.set_open(False)
+        self.chevron.set_open(on)
         self.hold_blur(True)
         self.anim.stop()
         start = self.wrap.height() if self.wrap.isVisible() else 0
-        if self.is_open:
+        end = 0
+        if on:
             self.wrap.show()
-            self.panel.pie.replay()
             end = self.wrap.full_height()
-        else:
-            end = 0
-            self.wrap.full_height()
-        self.anim.setEasingCurve(QEasingCurve.OutQuart if self.is_open else QEasingCurve.InOutCubic)
-        self.anim.setDuration(520 if self.is_open else 380)
+            self.panel.pie.hide_slices()
+            # let the slide get going before the pie starts drawing, so the two never compete for frames
+            QTimer.singleShot(220, lambda: self.panel.pie.replay() if self.is_open else None)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic if on else QEasingCurve.InOutCubic)
+        self.anim.setDuration(480 if on else 360)
         self.anim.setStartValue(start)
         self.anim.setEndValue(end)
         self.anim.start()
