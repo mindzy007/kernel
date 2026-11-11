@@ -959,9 +959,9 @@ ROW_TEXT_GAP = 48
 class PillLabel(QWidget):
     """Small fully-rounded, antialiased badge."""
 
-    def __init__(self, text, rgb=(255, 98, 104)):
+    def __init__(self, text, rgb=(255, 98, 104), text_rgb=(229, 120, 125)):
         super().__init__()
-        self.text, self.rgb = text, rgb
+        self.text, self.rgb, self.text_rgb = text, rgb, text_rgb
         f = QFont(self.font())
         f.setPixelSize(13)
         f.setWeight(QFont.Normal)
@@ -978,7 +978,7 @@ class PillLabel(QWidget):
         p.setBrush(QColor(*self.rgb, 26))
         p.setPen(QPen(QColor(*self.rgb, 80), 1))
         p.drawRoundedRect(r, rad, rad)
-        p.setPen(QColor(229, 120, 125))
+        p.setPen(QColor(*self.text_rgb))
         p.drawText(self.rect(), Qt.AlignCenter, self.text)
 
 
@@ -3870,8 +3870,8 @@ class Kernel(QWidget):
                 legend.setStyleSheet("font-size: 13px;")
                 row.text_col.addWidget(legend)
                 bar = Bar()
-                bar.setFixedHeight(10)
-                bar.setMinimumWidth(260)
+                bar.setFixedHeight(14)
+                bar.setMinimumWidth(300)
                 row.right.addWidget(bar)
                 self.drive_box.addWidget(row)
                 self.drive_rows[root] = {"row": row, "bar": bar, "legend": legend, "legend_html": "",
@@ -3971,13 +3971,19 @@ class Kernel(QWidget):
 
     def app_row(self, app, top):
         kind = "Store app" if app["uwp"] else ("Game" if app["game"] else "App")
-        details = [kind] + ([app["publisher"]] if app["publisher"] else []) + (
+        details = ([app["publisher"]] if app["publisher"] else []) + (
             [app["location"]] if app["location"] else [])
         row = Row(app["name"], " · ".join(details))
         row.sub.setWordWrap(True)
+        accent, text = {"Game": ((181, 123, 255), (205, 168, 255)),
+                        "App": ((91, 156, 255), (150, 190, 255)),
+                        "Store app": ((79, 208, 138), (130, 222, 175))}[kind]
+        row.title_row.insertWidget(1, PillLabel(kind, accent, text))
         bar = Bar()
-        bar.set_value(app["size"] / top)
-        bar.setFixedWidth(120)
+        bar.setFixedHeight(8)
+        bar.setFixedWidth(140)
+        bar.set_value(0.0)  # grows from empty to its share of the biggest app
+        bar.set_segments([(max(app["size"] / top, 0.03), "#%02x%02x%02x" % accent)])
         sz = QLabel(apps.human(app["size"]))
         sz.setStyleSheet("font-size: 15px;")
         sz.setFixedWidth(70)
