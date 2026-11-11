@@ -50,6 +50,29 @@ def drives():
     return out
 
 
+MODEL_SCRIPT = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+@(Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object {
+  $d = Get-Disk -Number $_.DiskNumber
+  [pscustomobject]@{ letter = [string]$_.DriveLetter; model = (($d.FriendlyName -replace '\s+', ' ')).Trim() }
+}) | ConvertTo-Json -Compress
+"""
+
+
+def drive_models():
+    """{'C:\\': 'Samsung SSD 980 PRO 1TB', ...}: the model name Windows reports for the physical disk
+    behind each drive letter. Empty if it can't be read."""
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", MODEL_SCRIPT],
+                           capture_output=True, text=True, creationflags=NOWIN | BELOW_NORMAL, timeout=30)
+        data = json.loads(r.stdout) if r.stdout.strip() else []
+    except Exception:
+        return {}
+    if isinstance(data, dict):
+        data = [data]
+    return {f"{d['letter'].upper()}:\\": d["model"] for d in data if d.get("letter") and d.get("model")}
+
+
 def lower_priority():
     """Background mode for the calling thread: low CPU and low disk priority, so the UI stays smooth."""
     try:

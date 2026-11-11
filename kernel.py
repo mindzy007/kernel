@@ -1116,9 +1116,13 @@ class DotPie(QWidget):
         self.norm = [math.hypot(x, y) / (self.RINGS * self.SPACING) for x, y in pts]  # 0 centre .. 1 outer ring
         self.pts = pts
         self.sweep_anim = QVariantAnimation(self)
-        self.sweep_anim.setDuration(520)
-        self.sweep_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.sweep_anim.setDuration(900)
+        self.sweep_anim.setEasingCurve(QEasingCurve.InOutSine)
         self.sweep_anim.valueChanged.connect(self._set_sweep)
+        self._pending = -1
+        self.settle = QTimer(self)  # the pointer must rest on a group a moment before the highlight moves
+        self.settle.setSingleShot(True)
+        self.settle.timeout.connect(lambda: self._set_hover(self._pending))
         self.tick = QTimer(self)  # eases every group toward its hover target, so hover never snaps
         self.tick.setInterval(15)
         self.tick.timeout.connect(self._ease)
@@ -1131,7 +1135,7 @@ class DotPie(QWidget):
         busy = False
         for i, v in enumerate(self.pops):
             target = 1.0 if i == self.hover else 0.0
-            v += (target - v) * 0.22
+            v += (target - v) * 0.13
             if abs(target - v) < 0.004:
                 v = target
             else:
@@ -1234,14 +1238,15 @@ class DotPie(QWidget):
         full = 2 * self.DOT + 2
         sprites = [self.sprite(sl[2]) for sl in self.slices]
         for idx, (x, y) in enumerate(self.pts):
-            appear = min(1.0, max(0.0, (self._sweep * 1.35 - self.norm[idx]) / 0.35))  # centre first, edge last
+            appear = min(1.0, max(0.0, (self._sweep * 1.7 - self.norm[idx]) / 0.7))  # centre first, edge last, wide overlap
             if appear <= 0:
                 continue
             g = self.owner[idx]
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
-            side = full * (1 - (1 - appear) ** 3) * (1 + 0.06 * pop)
-            p.setOpacity(1.0 - 0.3 * dim * (1 - pop))
+            grow = 1 + 1.6 * (appear - 1) ** 3 + 0.6 * (appear - 1) ** 2  # settles with a tiny overshoot
+            side = full * grow * (1 + 0.06 * pop)
+            p.setOpacity(min(1.0, appear * 2.0) * (1.0 - 0.3 * dim * (1 - pop)))
             p.drawPixmap(QRectF(cx + x - side / 2, cy + y - side / 2, side, side), sprites[g],
                          QRectF(sprites[g].rect()))
 
@@ -1265,10 +1270,17 @@ class DotPie(QWidget):
         self.hovered.emit(idx)
 
     def mouseMoveEvent(self, e):
-        self._set_hover(self._hit(e.position()))
+        idx = self._hit(e.position())
+        if idx == self.hover:
+            self._pending = idx
+            self.settle.stop()
+        elif idx != self._pending or not self.settle.isActive():
+            self._pending = idx
+            self.settle.start(90 if idx < 0 else 55)  # leaving is slower than switching: no flicker in the gaps
 
     def leaveEvent(self, e):
-        self._set_hover(-1)
+        self._pending = -1
+        self.settle.start(70)
 
 
 class ChevronIcon(QWidget):
@@ -1398,7 +1410,7 @@ class DrivePanel(QWidget):
             self.detail.set_text(self.HINT, MUTED)
             return
         name, size, _ = self.pie.slices[idx]
-        self.detail.set_text(f"{name}  ·  {apps.human(size)}  ·  {self._pct(size)}", "#ffffff")
+        self.detail.set_text(f"{name}  ·  {apps.human(size)}  ·  {self._pct(size)}", "#a9a9a9")
 
     def _pct(self, size):
         v = size / self.total * 100 if self.total else 0
@@ -3567,6 +3579,7 @@ class Kernel(QWidget):
     specs_ready = Signal(list, str)
     updates_ready = Signal(object)
     drives_ready = Signal(list)
+    models_ready = Signal(dict)
     storage_ready = Signal(str, dict)
     scan_finished = Signal()
     monitor_sample = Signal(dict)
@@ -4485,6 +4498,8 @@ class Kernel(QWidget):
         self.apps_anim = self.apps_extra = self.apps_more = None
         self.drive_rows = {}
         self.drive_results = {}
+        self.drive_models = {}
+        self.models_ready.connect(self.apply_models)
         self.storage_ready.connect(self.show_usage)
         self.scan_finished.connect(lambda: self.rescan_btn.setEnabled(True))
         self.drives_ready.connect(self.show_drives)
@@ -4497,6 +4512,7 @@ class Kernel(QWidget):
 
         def work():
             self.drives_ready.emit(storage.drives())
+            self.models_ready.emit(storage.drive_models())  # the disk's own model name, a moment later
         threading.Thread(target=work, daemon=True).start()
 
     def show_drives(self, items):
@@ -4612,6 +4628,11 @@ class Kernel(QWidget):
         btn.setText("Uninstall")
         subprocess.Popen(app["command"], shell=True)
 
+    def apply_models(self, models):
+        self.drive_models = models
+        for root in self.drive_rows:
+            self.refresh_panel(root)
+
     def refresh_panel(self, root):
         info = self.drive_rows.get(root)
         if not info:
@@ -4621,7 +4642,7 @@ class Kernel(QWidget):
                                     res.get("categories", []) if res else [],
                                     res.get("root", []) if res else [],
                                     res.get("apps", []) if res else [],
-                                    scanning=res is None, name=info["row"].title)
+                                    scanning=res is None, name=self.drive_models.get(root) or info["row"].title)
         QTimer.singleShot(0, info["item"].sync)
 
     def apply_usage(self, root, res):
