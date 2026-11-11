@@ -982,6 +982,78 @@ class PillLabel(QWidget):
         p.drawText(self.rect(), Qt.AlignCenter, self.text)
 
 
+class PathChip(QWidget):
+    """Button-like chip: "Open in Explorer" plus the folder path. Fades a brighter fill in on hover."""
+    clicked = Signal()
+    PAD, GAP, H = 12, 10, 28
+
+    def __init__(self, path):
+        super().__init__()
+        self.path, self._hover = path, 0.0
+        f = QFont(self.font())
+        f.setPixelSize(13)
+        self.setFont(f)
+        self.fm = QFontMetrics(f)
+        bold = QFont(f)
+        bold.setWeight(QFont.DemiBold)
+        self.bold, self.label = bold, "Open in Explorer \u2197"
+        self.label_w = QFontMetrics(bold).horizontalAdvance(self.label)
+        self.setFixedHeight(self.H)
+        self.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+        self.setCursor(Qt.PointingHandCursor)
+        self.anim = QVariantAnimation(self)
+        self.anim.setDuration(160)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.valueChanged.connect(self._set_hover)
+
+    def _set_hover(self, v):
+        self._hover = float(v)
+        self.update()
+
+    def _fade(self, end):
+        self.anim.stop()
+        self.anim.setStartValue(self._hover)
+        self.anim.setEndValue(end)
+        self.anim.start()
+
+    def sizeHint(self):
+        return QSize(self.PAD * 2 + self.label_w + self.GAP + self.fm.horizontalAdvance(self.path), self.H)
+
+    def minimumSizeHint(self):
+        return QSize(self.PAD * 2 + self.label_w, self.H)
+
+    def enterEvent(self, e):
+        self._fade(1.0)
+
+    def leaveEvent(self, e):
+        self._fade(0.0)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        h = self._hover
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setBrush(QColor(255, 255, 255, int(14 + 26 * h)))
+        p.setPen(QPen(QColor(255, 255, 255, int(34 + 50 * h)), 1))
+        p.drawRoundedRect(r, 9, 9)
+        x = self.PAD
+        p.setFont(self.bold)
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QRectF(x, 0, self.label_w, self.height()), Qt.AlignVCenter | Qt.AlignLeft, self.label)
+        x += self.label_w + self.GAP
+        room = self.width() - x - self.PAD
+        if room > 20:
+            p.setFont(self.font())
+            g = int(138 + 70 * h)
+            p.setPen(QColor(g, g, g))
+            p.drawText(QRectF(x, 0, room, self.height()), Qt.AlignVCenter | Qt.AlignLeft,
+                       self.fm.elidedText(self.path, Qt.ElideMiddle, room))
+
+
 class Row(HoverFrame):
     def __init__(self, title, subtitle="", icon=None, right_margin=16):
         super().__init__()
@@ -3971,10 +4043,19 @@ class Kernel(QWidget):
 
     def app_row(self, app, top):
         kind = "Store app" if app["uwp"] else ("Game" if app["game"] else "App")
-        details = ([app["publisher"]] if app["publisher"] else []) + (
-            [app["location"]] if app["location"] else [])
+        loc = app["location"]
+        openable = bool(loc) and os.path.isdir(loc)
+        details = [html.escape(app["publisher"])] if app["publisher"] else []
+        if loc and not openable:
+            details.append(html.escape(loc))
         row = Row(app["name"], " · ".join(details))
         row.sub.setWordWrap(True)
+        row.sub.setTextFormat(Qt.RichText)
+        row.text_col.setSpacing(6)  # a little air between the title, details and link
+        if openable:
+            link = PathChip(loc)
+            link.clicked.connect(lambda path=loc: os.startfile(path))
+            row.text_col.addWidget(link, 0, Qt.AlignLeft)
         accent, text = {"Game": ((181, 123, 255), (205, 168, 255)),
                         "App": ((91, 156, 255), (150, 190, 255)),
                         "Store app": ((79, 208, 138), (130, 222, 175))}[kind]
