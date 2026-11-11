@@ -41,7 +41,7 @@ BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
 TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 56, 4, 56
-TINT = 130  # darkness (0-255) of the title bar blur
+TINT = 165  # darkness (0-255) of the title bar blur
 BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
 ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
@@ -1088,9 +1088,11 @@ class TaskRow(Row):
 class RunRow(Row):
     """Single-use action: one click runs it."""
 
-    def __init__(self, title, subtitle, on_run, active=False):
+    def __init__(self, title, subtitle, on_run, active=False, warn=True):
         super().__init__(title, subtitle)
         self.sub.setWordWrap(True)
+        if warn:
+            self.title_row.insertWidget(1, PillLabel("Cannot be reverted"))
         self.b = Button("Run")
         self.b.setCursor(Qt.PointingHandCursor)
         self.b.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
@@ -3798,7 +3800,7 @@ class Kernel(QWidget):
     def run_row(self, name, fn):
         row = RunRow(name, next(t[2] for t in TASKS if t[3] is fn),
                      lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
-                     is_active(fn))
+                     is_active(fn), warn=fn.__name__ != "t_system_repair")
         self.action_rows.append((row, fn))
         return row
 
