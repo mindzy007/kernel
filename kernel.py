@@ -1090,22 +1090,33 @@ class Row(HoverFrame):
         lay.addLayout(self.right)
 
 
-class Pie3D(QWidget):
-    """Tilted 3D pie. Grows in when its data changes; hovering a slice pops it out."""
+class DotPie(QWidget):
+    """A drive's usage as a disc of 100 dots. Each category owns one wedge of dots (grouped, never scattered)
+    in its own colour. Dots pop in around the circle; hovering a dot lifts its whole group."""
     hovered = Signal(int)
-    DEPTH, TILT = 12, 0.78
+    N = 100
+    RINGS = ((1, 0.0), (7, 1.1), (13, 2.05), (19, 3.0), (25, 4.0), (35, 5.0))  # (dots, radius) = 100 dots
+    SPACING, DOT = 20.0, 7.4
 
     def __init__(self):
         super().__init__()
-        self.setFixedSize(260, 226)
+        self.setFixedSize(260, 240)
         self.setMouseTracking(True)
         self.slices = []  # (name, bytes, "#rrggbb")
+        self.owner = []  # slice index of every dot, in clockwise order from the top
         self._sweep, self.hover, self.pops = 1.0, -1, []
+        pts = []
+        for k, (n, radius) in enumerate(self.RINGS):
+            for j in range(n):
+                a = 2 * math.pi * j / n + k * 0.5  # each ring is turned a little, so rows don't line up
+                pts.append((radius * self.SPACING * math.sin(a), -radius * self.SPACING * math.cos(a)))
+        pts.sort(key=lambda q: math.atan2(q[0], -q[1]) % (2 * math.pi) if q != (0.0, 0.0) else 0.0)
+        self.pts = pts
         self.sweep_anim = QVariantAnimation(self)
-        self.sweep_anim.setDuration(750)
-        self.sweep_anim.setEasingCurve(QEasingCurve.OutQuart)
+        self.sweep_anim.setDuration(900)
+        self.sweep_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.sweep_anim.valueChanged.connect(self._set_sweep)
-        self.tick = QTimer(self)  # eases every slice toward its pop target, so hover never snaps
+        self.tick = QTimer(self)  # eases every group toward its hover target, so hover never snaps
         self.tick.setInterval(15)
         self.tick.timeout.connect(self._ease)
 
@@ -1117,7 +1128,7 @@ class Pie3D(QWidget):
         busy = False
         for i, v in enumerate(self.pops):
             target = 1.0 if i == self.hover else 0.0
-            v += (target - v) * 0.2
+            v += (target - v) * 0.22
             if abs(target - v) < 0.004:
                 v = target
             else:
@@ -1138,115 +1149,66 @@ class Pie3D(QWidget):
         self.sweep_anim.setEndValue(1.0)
         self.sweep_anim.start()
 
+    def _allocate(self):
+        """How many of the 100 dots each slice gets: proportional, every non-empty slice at least one."""
+        total = sum(s[1] for s in self.slices) or 1
+        raw = [s[1] / total * self.N for s in self.slices]
+        counts = [int(r) for r in raw]
+        order = sorted(range(len(raw)), key=lambda i: raw[i] - counts[i], reverse=True)
+        for i in order[:self.N - sum(counts)]:
+            counts[i] += 1
+        for i, c in enumerate(counts):
+            if c == 0 and self.slices[i][1] > 0:
+                counts[max(range(len(counts)), key=lambda k: counts[k])] -= 1
+                counts[i] = 1
+        return counts
+
     def set_slices(self, slices):
         slices = [s for s in slices if s[1] > 0]
         if slices == self.slices:
             return
         self.slices = slices
+        self.owner = [i for i, c in enumerate(self._allocate()) for _ in range(c)]
         self.pops = [0.0] * len(slices)
         self.hover = -1
         self.replay()
-
-    def _geom(self):
-        w, h = self.width(), self.height()
-        rx = min(w / 2 - 20, (h - self.DEPTH - 30) / (2 * self.TILT))
-        return w / 2, (h - self.DEPTH) / 2, rx, rx * self.TILT
-
-    def _spans(self):
-        total = sum(s[1] for s in self.slices) or 1
-        out, acc = [], 0
-        for _, size, _ in self.slices:
-            out.append((acc / total, (acc + size) / total))
-            acc += size
-        return out
-
-    def _arc(self, f0, f1, ox, oy):
-        cx, cy, rx, ry = self._geom()
-        a0, a1 = f0 * self._sweep, f1 * self._sweep
-        n = max(2, int((a1 - a0) * 120) + 2)
-        pts = []
-        for i in range(n + 1):
-            t = math.pi / 2 - (a0 + (a1 - a0) * i / n) * 2 * math.pi
-            pts.append((cx + ox + rx * math.cos(t), cy + oy - ry * math.sin(t), t))
-        return pts
-
-    def _offset(self, i, f0, f1):
-        pop = self.pops[i] if i < len(self.pops) else 0.0
-        if pop <= 0:
-            return 0.0, 0.0
-        pop = pop * pop * (3 - 2 * pop)  # smoothstep
-        t = math.pi / 2 - (f0 + f1) / 2 * self._sweep * 2 * math.pi
-        return math.cos(t) * 9 * pop, -math.sin(t) * 5 * pop
 
     def paintEvent(self, _):
         if not self.slices:
             return
         p = QPainter(self)
         p.setRenderHints(QPainter.Antialiasing)
-        cx, cy, rx, ry = self._geom()
-        p.setPen(Qt.NoPen)
-        spans = self._spans()
-        order = sorted(range(len(spans)), key=lambda i: self.pops[i])  # raised slices paint last
-        for i in order:  # sides first: they only show where they face the viewer
-            f0, f1 = spans[i]
-            ox, oy = self._offset(i, f0, f1)
-            base = QColor(self.slices[i][2])
-            g = QLinearGradient(cx - rx, 0, cx + rx, 0)  # darker toward the edges: reads as a rounded wall
-            g.setColorAt(0.0, base.darker(215))
-            g.setColorAt(0.5, base.darker(140))
-            g.setColorAt(1.0, base.darker(215))
-            p.setPen(QPen(QBrush(g), 1))
-            p.setBrush(QBrush(g))
-            run = []
-            for x, y, t in self._arc(f0, f1, ox, oy) + [(0, 0, 1.0)]:
-                if math.sin(t) <= 0.001 and (x or y):
-                    run.append((x, y))
-                    continue
-                if len(run) > 1:
-                    wall = QPolygonF([QPointF(a, b) for a, b in run]
-                                     + [QPointF(a, b + self.DEPTH) for a, b in reversed(run)])
-                    p.setPen(QPen(QBrush(g), 1))
-                    p.setBrush(QBrush(g))
-                    p.drawPolygon(wall)
-                    top_y = min(b for _, b in run)
-                    shade = QLinearGradient(0, top_y, 0, top_y + self.DEPTH + ry)
-                    shade.setColorAt(0.0, QColor(0, 0, 0, 0))
-                    shade.setColorAt(1.0, QColor(0, 0, 0, 110))
-                    p.setPen(Qt.NoPen)
-                    p.setBrush(QBrush(shade))
-                    p.drawPolygon(wall)
-                run = []
-        for i in order:
-            f0, f1 = spans[i]
-            ox, oy = self._offset(i, f0, f1)
-            color = QColor(self.slices[i][2])
-            g = QRadialGradient(cx - rx * 0.28, cy - ry * 0.4, rx * 1.25)  # soft light from the top left
-            g.setColorAt(0.0, color.lighter(128))
-            g.setColorAt(0.6, color)
-            g.setColorAt(1.0, color.darker(118))
-            arc = self._arc(f0, f1, ox, oy)
+        cx, cy = self.width() / 2, self.height() / 2
+        n = len(self.pts)
+        dim = max(self.pops) if self.pops else 0.0
+        for idx, (x, y) in enumerate(self.pts):
+            appear = min(1.0, max(0.0, (self._sweep * (n + 12) - idx) / 12))
+            if appear <= 0:
+                continue
+            g = self.owner[idx]
+            pop = self.pops[g]
+            pop = pop * pop * (3 - 2 * pop)
+            r = self.DOT * (1 - (1 - appear) ** 3) * (1 + 0.3 * pop)
+            color = QColor(self.slices[g][2])
+            color.setAlphaF(1.0 - 0.6 * dim * (1 - pop))
+            c = QPointF(cx + x, cy + y)
+            grad = QRadialGradient(QPointF(c.x() - r * 0.3, c.y() - r * 0.35), r * 1.5)
+            grad.setColorAt(0.0, color.lighter(122))
+            grad.setColorAt(1.0, color)
             p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(g))
-            p.drawPolygon(QPolygonF([QPointF(cx + ox, cy + oy)] + [QPointF(x, y) for x, y, _ in arc]))
-            rim = QPen(QColor(255, 255, 255, 46), 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            p.setPen(rim)
-            p.setBrush(Qt.NoBrush)
-            p.drawPolyline(QPolygonF([QPointF(x, y) for x, y, _ in arc]))
-            if len(self.slices) > 1:  # thin soft seams between slices instead of an outline around each one
-                p.setPen(QPen(QColor(10, 10, 12, 150), 1.6, Qt.SolidLine, Qt.RoundCap))
-                p.drawLine(QPointF(cx + ox, cy + oy), QPointF(arc[0][0], arc[0][1]))
-                p.drawLine(QPointF(cx + ox, cy + oy), QPointF(arc[-1][0], arc[-1][1]))
+            p.setBrush(QBrush(grad))
+            p.drawEllipse(c, r, r)
 
     def _hit(self, pos):
-        cx, cy, rx, ry = self._geom()
-        u, v = (pos.x() - cx) / rx, (cy - pos.y()) / ry
-        if self._sweep < 1.0 or u * u + v * v > 1.0:
+        if self._sweep < 1.0:
             return -1
-        frac = ((math.pi / 2 - math.atan2(v, u)) / (2 * math.pi)) % 1.0
-        for i, (f0, f1) in enumerate(self._spans()):
-            if f0 <= frac < f1:
-                return i
-        return -1
+        cx, cy = self.width() / 2, self.height() / 2
+        best, best_d = -1, (self.DOT + 3) ** 2
+        for idx, (x, y) in enumerate(self.pts):
+            d = (pos.x() - cx - x) ** 2 + (pos.y() - cy - y) ** 2
+            if d <= best_d:
+                best, best_d = self.owner[idx], d
+        return best
 
     def _set_hover(self, idx):
         if idx == self.hover:
@@ -1317,7 +1279,7 @@ class DrivePanel(QWidget):
         lay.setSpacing(36)
         left = QVBoxLayout()
         left.setSpacing(12)
-        self.pie = Pie3D()
+        self.pie = DotPie()
         self.pie.hovered.connect(self._hover)
         self.caption = QLabel("")
         self.caption.setObjectName("muted")
@@ -1426,7 +1388,7 @@ class DrivePanel(QWidget):
             slices = [(n, s, CATEGORY_COLORS[n]) for n, s in categories]
         else:
             slices = [("Used", used, "#cfcfcf")]
-        self.pie.set_slices(slices + [("Free", free, "#34343b")])
+        self.pie.set_slices(slices + [("Free", free, "#46464f")])
         _clear_layout(self.right)
         pct = round(used / total * 100) if total else 0
         stats = QHBoxLayout()
