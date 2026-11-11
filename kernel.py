@@ -1037,8 +1037,8 @@ class PathChip(QWidget):
         p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
         h = self._hover
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        p.setBrush(QColor(255, 255, 255, int(14 + 26 * h)))
-        p.setPen(QPen(QColor(255, 255, 255, int(34 + 50 * h)), 1))
+        p.setBrush(QColor(255, 255, 255, int(14 + 12 * h)))
+        p.setPen(QPen(QColor(255, 255, 255, int(34 + 24 * h)), 1))
         p.drawRoundedRect(r, 9, 9)
         x = self.PAD
         p.setFont(self.bold)
@@ -1048,7 +1048,7 @@ class PathChip(QWidget):
         room = self.width() - x - self.PAD
         if room > 20:
             p.setFont(self.font())
-            g = int(138 + 70 * h)
+            g = int(138 + 34 * h)
             p.setPen(QColor(g, g, g))
             p.drawText(QRectF(x, 0, room, self.height()), Qt.AlignVCenter | Qt.AlignLeft,
                        self.fm.elidedText(self.path, Qt.ElideMiddle, room))
