@@ -1093,17 +1093,17 @@ class Row(HoverFrame):
 class Pie3D(QWidget):
     """Tilted 3D pie. Grows in when its data changes; hovering a slice pops it out."""
     hovered = Signal(int)
-    DEPTH, TILT = 16, 0.5
+    DEPTH, TILT = 14, 0.62
 
     def __init__(self):
         super().__init__()
-        self.setFixedSize(260, 178)
+        self.setFixedSize(260, 200)
         self.setMouseTracking(True)
         self.slices = []  # (name, bytes, "#rrggbb")
         self._sweep, self.hover, self.pops = 1.0, -1, []
         self.sweep_anim = QVariantAnimation(self)
-        self.sweep_anim.setDuration(850)
-        self.sweep_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.sweep_anim.setDuration(1100)
+        self.sweep_anim.setEasingCurve(QEasingCurve.OutQuart)
         self.sweep_anim.valueChanged.connect(self._set_sweep)
         self.tick = QTimer(self)  # eases every slice toward its pop target, so hover never snaps
         self.tick.setInterval(15)
@@ -1180,17 +1180,18 @@ class Pie3D(QWidget):
         p.setRenderHints(QPainter.Antialiasing)
         cx, cy, rx, ry = self._geom()
         p.setPen(Qt.NoPen)
-        for grow, alpha in ((1.10, 7), (1.04, 9)):  # faint glow under the pie
-            p.setBrush(QColor(255, 255, 255, alpha))
-            p.drawEllipse(QRectF(cx - rx * grow, cy + self.DEPTH * 0.6 - ry * grow, rx * 2 * grow, ry * 2 * grow))
         spans = self._spans()
         order = sorted(range(len(spans)), key=lambda i: self.pops[i])  # raised slices paint last
         for i in order:  # sides first: they only show where they face the viewer
             f0, f1 = spans[i]
             ox, oy = self._offset(i, f0, f1)
-            side = QColor(self.slices[i][2]).darker(165)
-            p.setPen(QPen(side, 1))
-            p.setBrush(side)
+            base = QColor(self.slices[i][2])
+            g = QLinearGradient(cx - rx, 0, cx + rx, 0)  # darker toward the edges: reads as a rounded wall
+            g.setColorAt(0.0, base.darker(215))
+            g.setColorAt(0.5, base.darker(140))
+            g.setColorAt(1.0, base.darker(215))
+            p.setPen(QPen(QBrush(g), 1))
+            p.setBrush(QBrush(g))
             run = []
             for x, y, t in self._arc(f0, f1, ox, oy) + [(0, 0, 1.0)]:
                 if math.sin(t) <= 0.001 and (x or y):
@@ -1204,12 +1205,18 @@ class Pie3D(QWidget):
             f0, f1 = spans[i]
             ox, oy = self._offset(i, f0, f1)
             color = QColor(self.slices[i][2])
-            g = QLinearGradient(0, cy - ry, 0, cy + ry)
-            g.setColorAt(0.0, color.lighter(118))
-            g.setColorAt(1.0, color)
-            p.setPen(QPen(QColor(8, 8, 8, 210), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            g = QRadialGradient(cx - rx * 0.28, cy - ry * 0.4, rx * 1.25)  # soft light from the top left
+            g.setColorAt(0.0, color.lighter(128))
+            g.setColorAt(0.6, color)
+            g.setColorAt(1.0, color.darker(118))
+            arc = self._arc(f0, f1, ox, oy)
+            p.setPen(Qt.NoPen)
             p.setBrush(QBrush(g))
-            p.drawPolygon(QPolygonF([QPointF(cx + ox, cy + oy)] + [QPointF(x, y) for x, y, _ in self._arc(f0, f1, ox, oy)]))
+            p.drawPolygon(QPolygonF([QPointF(cx + ox, cy + oy)] + [QPointF(x, y) for x, y, _ in arc]))
+            if len(self.slices) > 1:  # thin soft seams between slices instead of an outline around each one
+                p.setPen(QPen(QColor(10, 10, 12, 150), 1.6, Qt.SolidLine, Qt.RoundCap))
+                p.drawLine(QPointF(cx + ox, cy + oy), QPointF(arc[0][0], arc[0][1]))
+                p.drawLine(QPointF(cx + ox, cy + oy), QPointF(arc[-1][0], arc[-1][1]))
 
     def _hit(self, pos):
         cx, cy, rx, ry = self._geom()
@@ -1245,8 +1252,8 @@ class ChevronIcon(QWidget):
         self.setFixedSize(20, 20)
         self._t = 0.0
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(260)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.setDuration(420)
+        self.anim.setEasingCurve(QEasingCurve.OutQuart)
         self.anim.valueChanged.connect(self._set)
 
     def _set(self, v):
@@ -1487,7 +1494,6 @@ class DriveItem(QWidget):
         row.setCursor(Qt.PointingHandCursor)
         row.clicked.connect(self.toggle)
         self.anim = QVariantAnimation(self)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)
         self.anim.valueChanged.connect(self._step)
         self.anim.finished.connect(self._done)
 
@@ -1536,7 +1542,8 @@ class DriveItem(QWidget):
         else:
             end = 0
             self.wrap.full_height()
-        self.anim.setDuration(340 if self.is_open else 260)
+        self.anim.setEasingCurve(QEasingCurve.OutQuart if self.is_open else QEasingCurve.InOutCubic)
+        self.anim.setDuration(520 if self.is_open else 380)
         self.anim.setStartValue(start)
         self.anim.setEndValue(end)
         self.anim.start()
