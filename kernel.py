@@ -1093,16 +1093,16 @@ class Row(HoverFrame):
 class Pie3D(QWidget):
     """Tilted 3D pie. Grows in when its data changes; hovering a slice pops it out."""
     hovered = Signal(int)
-    DEPTH, TILT = 14, 0.62
+    DEPTH, TILT = 12, 0.78
 
     def __init__(self):
         super().__init__()
-        self.setFixedSize(260, 200)
+        self.setFixedSize(260, 226)
         self.setMouseTracking(True)
         self.slices = []  # (name, bytes, "#rrggbb")
         self._sweep, self.hover, self.pops = 1.0, -1, []
         self.sweep_anim = QVariantAnimation(self)
-        self.sweep_anim.setDuration(1100)
+        self.sweep_anim.setDuration(750)
         self.sweep_anim.setEasingCurve(QEasingCurve.OutQuart)
         self.sweep_anim.valueChanged.connect(self._set_sweep)
         self.tick = QTimer(self)  # eases every slice toward its pop target, so hover never snaps
@@ -1149,7 +1149,7 @@ class Pie3D(QWidget):
 
     def _geom(self):
         w, h = self.width(), self.height()
-        rx = min(w / 2 - 14, (h - self.DEPTH - 22) / (2 * self.TILT))
+        rx = min(w / 2 - 20, (h - self.DEPTH - 30) / (2 * self.TILT))
         return w / 2, (h - self.DEPTH) / 2, rx, rx * self.TILT
 
     def _spans(self):
@@ -1255,14 +1255,18 @@ class ChevronIcon(QWidget):
     def __init__(self):
         super().__init__()
         self.setFixedSize(20, 20)
-        self._t = 0.0
+        self._t, self._dim = 0.0, False
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(420)
-        self.anim.setEasingCurve(QEasingCurve.OutQuart)
+        self.anim.setDuration(280)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
         self.anim.valueChanged.connect(self._set)
 
     def _set(self, v):
         self._t = float(v)
+        self.update()
+
+    def set_dim(self, dim):
+        self._dim = dim
         self.update()
 
     def set_open(self, on):
@@ -1276,7 +1280,7 @@ class ChevronIcon(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.translate(self.width() / 2, self.height() / 2)
         p.rotate(90 * self._t)
-        p.setPen(QPen(QColor(150, 150, 150), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setPen(QPen(QColor(150, 150, 150, 70 if self._dim else 255), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.drawPolyline(QPolygonF([QPointF(-2.5, -5), QPointF(2.5, 0), QPointF(-2.5, 5)]))
 
 
@@ -1486,7 +1490,7 @@ class DriveItem(QWidget):
 
     def __init__(self, row):
         super().__init__()
-        self.row, self.is_open, self.holding = row, False, False
+        self.row, self.is_open, self.holding, self.locked = row, False, False, False
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
@@ -1535,7 +1539,18 @@ class DriveItem(QWidget):
                 win.refresh_pill_backdrop()
 
     def toggle(self):
-        self.set_open(not self.is_open)
+        if not self.locked:
+            self.set_open(not self.is_open)
+
+    def set_locked(self, locked):
+        """A drive that is still being scanned has nothing to show yet: not clickable until it finishes."""
+        if locked == self.locked:
+            return
+        self.locked = locked
+        if locked:
+            self.set_open(False)
+        self.row.setCursor(Qt.ArrowCursor if locked else Qt.PointingHandCursor)
+        self.chevron.set_dim(locked)
 
     def set_open(self, on):
         if on == self.is_open:
@@ -1556,9 +1571,9 @@ class DriveItem(QWidget):
             end = self.wrap.full_height()
             self.panel.pie.hide_slices()
             # let the slide get going before the pie starts drawing, so the two never compete for frames
-            QTimer.singleShot(220, lambda: self.panel.pie.replay() if self.is_open else None)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic if on else QEasingCurve.InOutCubic)
-        self.anim.setDuration(480 if on else 360)
+            QTimer.singleShot(110, lambda: self.panel.pie.replay() if self.is_open else None)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)  # moves at full speed from the first frame
+        self.anim.setDuration(300 if on else 230)
         self.anim.setStartValue(start)
         self.anim.setEndValue(end)
         self.anim.start()
@@ -4444,6 +4459,7 @@ class Kernel(QWidget):
             info["row"].sub.show()
             if cached:
                 continue
+            info["item"].set_locked(True)  # scanning: nothing to open yet
             if not info["legend_html"]:
                 info["bar"].set_value(total_fraction(total, free))
                 info["legend"].setText('<span style="color:#8a8a8a">Scanning...</span>')
@@ -4531,6 +4547,8 @@ class Kernel(QWidget):
 
     def apply_usage(self, root, res):
         self.drive_results[root] = res
+        if root in self.drive_rows:
+            self.drive_rows[root]["item"].set_locked(False)
         self.show_drive_breakdown(root, res.get("categories", []))
         self.storage_apps[root] = res.get("apps", [])
         self.refresh_panel(root)
