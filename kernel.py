@@ -964,7 +964,7 @@ class PillLabel(QWidget):
         self.text, self.rgb = text, rgb
         f = QFont(self.font())
         f.setPixelSize(13)
-        f.setWeight(QFont.Medium)
+        f.setWeight(QFont.Normal)
         self.setFont(f)
         fm = QFontMetrics(f)
         self.setFixedSize(fm.horizontalAdvance(text) + 22, fm.height() + 6)

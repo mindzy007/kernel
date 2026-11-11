@@ -300,6 +300,8 @@ def _set_widgets_toggle(on, log):
 
 def t_widgets(log):
     _set_widgets_toggle(False, log)
+    set_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "ShowTaskViewButton", 0)
+    log("Task View button hidden.")
 
 
 def t_lock_screen_widgets(log):
@@ -602,8 +604,10 @@ def _active_xbox():
 
 
 def _active_widgets():
-    return _reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
-                "TaskbarDa") == 0
+    return (_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                 "TaskbarDa") == 0
+            and _reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+                     "ShowTaskViewButton") == 0)
 
 
 ACTIVE_CHECKS = {
@@ -706,6 +710,7 @@ def revert_tweak(fn, log):
         log("Switched to High Performance and deleted all Ultimate Performance plans.")
     elif name == "t_widgets":
         _set_widgets_toggle(True, log)
+        set_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "ShowTaskViewButton", 1)
     elif name == "t_lock_screen_widgets":
         _delete_reg(HKLM, r"SOFTWARE\Policies\Microsoft\Dsh", "DisableWidgetsOnLockScreen")
     elif name == "t_time_format":
@@ -1120,7 +1125,7 @@ TASKS = [
     ("Storage", "System Cleanup", "Removes temporary system files, clears Windows prefetch data, and empties the Recycle Bin to free up disk space.", t_temp),
     ("System", "Enable Group Policy Editor", "Installs pro version of gpeditor on to your system", t_group_policy),
     ("Performance", "Ultimate performance", "Activate the maximum performance power plan", t_power),
-    ("Appearance", "Hide Widgets & Chat", "Remove the taskbar buttons", t_widgets),
+    ("Appearance", "Hide widgets from the taskbar", "Removes the Widgets and Task View buttons", t_widgets),
     ("Appearance", "Disable lock screen widgets", "Remove widgets from the Windows sign-in screen", t_lock_screen_widgets),
     ("Appearance", "Taskbar date format", "Show the date as MMM d, yyyy (e.g. Dec 31, 2030)", t_time_format),
     ("Appearance", "Enable End Task in taskbar", "Adds 'End task' to the right-click menu of taskbar apps", t_end_task),
