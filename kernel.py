@@ -1091,12 +1091,12 @@ class Row(HoverFrame):
 
 
 class DotPie(QWidget):
-    """A drive's usage as a disc of dots on a hexagonal grid: perfectly even rows, the same in every direction.
+    """A drive's usage as a round disc of dots: ring k holds 6k dots, so the outline is a true circle and the dots
+    line up along six spokes (1 + 6 + 12 + ... + 48 = 217 dots, the size where the circle is exactly full).
     Each category owns one wedge of dots (grouped, never scattered) in its own colour; a category worth a single
-    dot sits on the outer edge. Dots pop in around the circle; hovering a dot lifts its whole group.
-    The grid keeps every dot within 52 grid-units of the centre: 199 dots, the symmetric size closest to 200."""
+    dot sits on the outer ring. Dots pop in from the centre outward; hovering a dot lifts its whole group."""
     hovered = Signal(int)
-    SPACING, DOT, REACH = 15.0, 6.2, 52
+    RINGS, SPACING, DOT = 8, 13.5, 5.6
 
     def __init__(self):
         super().__init__()
@@ -1106,16 +1106,17 @@ class DotPie(QWidget):
         self.slices = []  # (name, bytes, "#rrggbb")
         self.owner = []  # slice index of every dot, in clockwise order from the top
         self._sweep, self.hover, self.pops = 1.0, -1, []
-        pts = []
-        for b in range(-9, 10):
-            for a in range(-9, 10):
-                if a * a + a * b + b * b <= self.REACH:  # hex grid coordinates
-                    pts.append(((a + b / 2) * self.SPACING, b * math.sqrt(3) / 2 * self.SPACING))
+        pts = [(0.0, 0.0)]
+        for k in range(1, self.RINGS + 1):
+            for j in range(6 * k):
+                a = 2 * math.pi * j / (6 * k)
+                pts.append((k * self.SPACING * math.sin(a), -k * self.SPACING * math.cos(a)))
         pts.sort(key=lambda q: math.atan2(q[0], -q[1]) % (2 * math.pi) if math.hypot(*q) > 1e-6 else 0.0)
         self.N = len(pts)
+        self.norm = [math.hypot(x, y) / (self.RINGS * self.SPACING) for x, y in pts]  # 0 centre .. 1 outer ring
         self.pts = pts
         self.sweep_anim = QVariantAnimation(self)
-        self.sweep_anim.setDuration(900)
+        self.sweep_anim.setDuration(520)
         self.sweep_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.sweep_anim.valueChanged.connect(self._set_sweep)
         self.tick = QTimer(self)  # eases every group toward its hover target, so hover never snaps
@@ -1171,7 +1172,7 @@ class DotPie(QWidget):
         def angle(i):
             x, y = self.pts[i]
             return math.atan2(x, -y) % (2 * math.pi)
-        outer_r = math.sqrt(48) * self.SPACING
+        outer_r = self.RINGS * self.SPACING - 0.01
         outer = [i for i, (x, y) in enumerate(self.pts) if math.hypot(x, y) >= outer_r]
         taken = set()
         for s in range(len(self.slices)):
@@ -1233,14 +1234,14 @@ class DotPie(QWidget):
         full = 2 * self.DOT + 2
         sprites = [self.sprite(sl[2]) for sl in self.slices]
         for idx, (x, y) in enumerate(self.pts):
-            appear = min(1.0, max(0.0, (self._sweep * (n + 16) - idx) / 16))
+            appear = min(1.0, max(0.0, (self._sweep * 1.35 - self.norm[idx]) / 0.35))  # centre first, edge last
             if appear <= 0:
                 continue
             g = self.owner[idx]
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
-            side = full * (1 - (1 - appear) ** 3) * (1 + 0.12 * pop)
-            p.setOpacity(1.0 - 0.4 * dim * (1 - pop))
+            side = full * (1 - (1 - appear) ** 3) * (1 + 0.06 * pop)
+            p.setOpacity(1.0 - 0.3 * dim * (1 - pop))
             p.drawPixmap(QRectF(cx + x - side / 2, cy + y - side / 2, side, side), sprites[g],
                          QRectF(sprites[g].rect()))
 
@@ -1314,6 +1315,48 @@ def _clear_layout(layout):
             _clear_layout(item.layout())
 
 
+class FadeText(QWidget):
+    """One centred line of text that cross-fades (and changes colour) when its text changes."""
+
+    def __init__(self, width, height, size=14):
+        super().__init__()
+        self.setFixedSize(width, height)
+        f = QFont(self.font())
+        f.setPixelSize(size)
+        self.setFont(f)
+        self.old = self.new = ("", QColor(MUTED))
+        self._t = 1.0
+        self.anim = QVariantAnimation(self)
+        self.anim.setDuration(260)
+        self.anim.setEasingCurve(QEasingCurve.InOutSine)
+        self.anim.valueChanged.connect(self._set)
+
+    def _set(self, v):
+        self._t = float(v)
+        self.update()
+
+    def set_text(self, text, color=MUTED):
+        color = QColor(color)
+        if (text, color) == self.new:
+            return
+        self.old = self.new  # what is showing right now fades out while the new text fades in
+        self.new = (text, color)
+        self.anim.stop()
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.start()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        for (text, color), alpha in ((self.old, 1.0 - self._t), (self.new, self._t)):
+            if alpha > 0.01 and text:
+                c = QColor(color)
+                c.setAlphaF(alpha)
+                p.setPen(c)
+                p.drawText(self.rect(), Qt.AlignCenter, text)
+
+
 class DrivePanel(QWidget):
     """Details for one drive: a 3D pie plus the stats that matter (used/free, breakdown, biggest folders)."""
 
@@ -1325,18 +1368,14 @@ class DrivePanel(QWidget):
         lay.setContentsMargins(26, 22, 26, 22)
         lay.setSpacing(36)
         left = QVBoxLayout()
-        left.setSpacing(12)
+        left.setSpacing(2)  # pie, drive line and highlighted-item line sit close together
         self.pie = DotPie()
         self.pie.hovered.connect(self._hover)
         self.caption = QLabel("")
         self.caption.setAlignment(Qt.AlignCenter)
         self.caption.setFixedWidth(260)
         self.caption.setStyleSheet("font-size: 16px; font-weight: 600;")
-        self.detail = QLabel("")
-        self.detail.setObjectName("muted")
-        self.detail.setAlignment(Qt.AlignCenter)
-        self.detail.setFixedSize(260, 22)
-        self.detail.setStyleSheet("font-size: 14px;")
+        self.detail = FadeText(260, 20)
         left.addWidget(self.pie, 0, Qt.AlignHCenter)
         left.addWidget(self.caption, 0, Qt.AlignHCenter)
         left.addWidget(self.detail, 0, Qt.AlignHCenter)
@@ -1356,12 +1395,10 @@ class DrivePanel(QWidget):
 
     def _hover(self, idx):
         if idx < 0:
-            self.detail.setText(self.HINT)
-            self.detail.setStyleSheet("font-size: 14px;")
+            self.detail.set_text(self.HINT, MUTED)
             return
         name, size, _ = self.pie.slices[idx]
-        self.detail.setText(f"{name}  ·  {apps.human(size)}  ·  {self._pct(size)}")
-        self.detail.setStyleSheet("font-size: 14px; color: #ffffff;")
+        self.detail.set_text(f"{name}  ·  {apps.human(size)}  ·  {self._pct(size)}", "#ffffff")
 
     def _pct(self, size):
         v = size / self.total * 100 if self.total else 0
@@ -1435,7 +1472,7 @@ class DrivePanel(QWidget):
         used = max(0, total - free)
         self.total = total
         self.caption.setText(f"{name}  ·  {apps.human(free)} free" if name else f"{apps.human(free)} free")
-        self.detail.setText("Scanning..." if scanning else self.HINT)
+        self.detail.set_text("Scanning..." if scanning else self.HINT, MUTED)
         if categories:
             slices = [(n, s, CATEGORY_COLORS[n]) for n, s in categories]
         else:
