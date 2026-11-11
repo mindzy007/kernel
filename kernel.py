@@ -46,8 +46,8 @@ BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
 ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
            ("Green", "#4fd08a"), ("Amber", "#ffb454"), ("Red", "#ff6b6b"))
-CATEGORY_COLORS = {"Apps": "#5b9cff", "Games": "#b57bff", "Documents & files": "#4fd08a",
-                   "System": "#ffb454", "Other": "#8a8a8a"}
+CATEGORY_COLORS = {"Apps": "#0a84ff", "Games": "#bf5af2", "Documents & files": "#30d158",
+                   "System": "#ff9f0a", "Other": "#8e8e93"}
 
 QSS = f"""
 * {{ font-family: 'Segoe UI Variable Text', 'Segoe UI'; color: {TEXT}; }}
@@ -1413,11 +1413,11 @@ class DrivePanel(QWidget):
         pct = round(used / total * 100) if total else 0
         stats = QHBoxLayout()
         stats.setSpacing(34)
-        stats.addLayout(self._stat("Used", apps.human(used), f"{pct}% of drive", "#ff9f0a"))
-        stats.addLayout(self._stat("Free", apps.human(free), f"{100 - pct}% available", "#30d158"))
+        stats.addLayout(self._stat("Used", apps.human(used), f"{pct}% of drive"))
+        stats.addLayout(self._stat("Free", apps.human(free), f"{100 - pct}% available"))
         if installed:
             stats.addLayout(self._stat("Apps & games", apps.human(sum(a["size"] for a in installed)),
-                                       f"{len(installed)} installed", "#0a84ff"))
+                                       f"{len(installed)} installed"))
         stats.addStretch()
         self.right.addLayout(stats)
         if categories:
@@ -4557,9 +4557,9 @@ class Kernel(QWidget):
             link = PathChip(loc)
             link.clicked.connect(lambda path=loc: os.startfile(path))
             row.text_col.addWidget(link, 0, Qt.AlignLeft)
-        accent, text = {"Game": ((181, 123, 255), (205, 168, 255)),
-                        "App": ((91, 156, 255), (150, 190, 255)),
-                        "Store app": ((79, 208, 138), (130, 222, 175))}[kind]
+        accent, text = {"Game": ((191, 90, 242), (214, 140, 255)),
+                        "App": ((10, 132, 255), (90, 170, 255)),
+                        "Store app": ((48, 209, 88), (90, 225, 125))}[kind]
         row.title_row.insertWidget(1, PillLabel(kind, accent, text))
         bar = Bar()
         bar.setFixedHeight(8)
