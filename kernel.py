@@ -1091,26 +1091,28 @@ class Row(HoverFrame):
 
 
 class DotPie(QWidget):
-    """A drive's usage as a disc of 100 dots. Each category owns one wedge of dots (grouped, never scattered)
-    in its own colour. Dots pop in around the circle; hovering a dot lifts its whole group."""
+    """A drive's usage as a disc of dots on a hexagonal grid: perfectly even rows, the same in every direction.
+    Each category owns one wedge of dots (grouped, never scattered) in its own colour; a category worth a single
+    dot sits on the outer edge. Dots pop in around the circle; hovering a dot lifts its whole group.
+    The grid keeps every dot within 52 grid-units of the centre: 199 dots, the symmetric size closest to 200."""
     hovered = Signal(int)
-    N = 100
-    RINGS = ((1, 0.0), (7, 1.1), (13, 2.05), (19, 3.0), (25, 4.0), (35, 5.0))  # (dots, radius) = 100 dots
-    SPACING, DOT = 20.0, 7.4
+    SPACING, DOT, REACH = 15.0, 6.2, 52
 
     def __init__(self):
         super().__init__()
-        self.setFixedSize(260, 240)
+        self.setFixedSize(260, 250)
         self.setMouseTracking(True)
+        self.sprites = {}
         self.slices = []  # (name, bytes, "#rrggbb")
         self.owner = []  # slice index of every dot, in clockwise order from the top
         self._sweep, self.hover, self.pops = 1.0, -1, []
         pts = []
-        for k, (n, radius) in enumerate(self.RINGS):
-            for j in range(n):
-                a = 2 * math.pi * j / n + k * 0.5  # each ring is turned a little, so rows don't line up
-                pts.append((radius * self.SPACING * math.sin(a), -radius * self.SPACING * math.cos(a)))
-        pts.sort(key=lambda q: math.atan2(q[0], -q[1]) % (2 * math.pi) if q != (0.0, 0.0) else 0.0)
+        for b in range(-9, 10):
+            for a in range(-9, 10):
+                if a * a + a * b + b * b <= self.REACH:  # hex grid coordinates
+                    pts.append(((a + b / 2) * self.SPACING, b * math.sqrt(3) / 2 * self.SPACING))
+        pts.sort(key=lambda q: math.atan2(q[0], -q[1]) % (2 * math.pi) if math.hypot(*q) > 1e-6 else 0.0)
+        self.N = len(pts)
         self.pts = pts
         self.sweep_anim = QVariantAnimation(self)
         self.sweep_anim.setDuration(900)
@@ -1163,41 +1165,84 @@ class DotPie(QWidget):
                 counts[i] = 1
         return counts
 
+    def _single_dots_outside(self):
+        """A category that is just one dot would vanish in the middle of the disc: swap it out to the nearest
+        spot on the outer ring (the dot it swaps with takes its old place, so every count stays the same)."""
+        def angle(i):
+            x, y = self.pts[i]
+            return math.atan2(x, -y) % (2 * math.pi)
+        outer_r = math.sqrt(48) * self.SPACING
+        outer = [i for i, (x, y) in enumerate(self.pts) if math.hypot(x, y) >= outer_r]
+        taken = set()
+        for s in range(len(self.slices)):
+            mine = [i for i, o in enumerate(self.owner) if o == s]
+            if len(mine) != 1:
+                continue
+            here = mine[0]
+            best = min((i for i in outer if i not in taken),
+                       key=lambda i: abs((angle(i) - angle(here) + math.pi) % (2 * math.pi) - math.pi),
+                       default=None)
+            if best is None:
+                continue
+            taken.add(best)
+            self.owner[here], self.owner[best] = self.owner[best], s
+
     def set_slices(self, slices):
         slices = [s for s in slices if s[1] > 0]
         if slices == self.slices:
             return
         self.slices = slices
         self.owner = [i for i, c in enumerate(self._allocate()) for _ in range(c)]
+        self._single_dots_outside()
         self.pops = [0.0] * len(slices)
         self.hover = -1
         self.replay()
+
+    def sprite(self, color):
+        """One pre-drawn, shaded dot per colour: painting 200 dots with fresh gradients every frame was the lag."""
+        dpr = self.devicePixelRatioF()
+        key = (color, dpr)
+        pm = self.sprites.get(key)
+        if pm is None:
+            side = 2 * self.DOT + 2
+            pm = QPixmap(int(math.ceil(side * dpr)), int(math.ceil(side * dpr)))
+            pm.setDevicePixelRatio(dpr)
+            pm.fill(Qt.transparent)
+            q = QPainter(pm)
+            q.setRenderHints(QPainter.Antialiasing)
+            c = QPointF(side / 2, side / 2)
+            base = QColor(color)
+            grad = QRadialGradient(QPointF(c.x() - self.DOT * 0.3, c.y() - self.DOT * 0.35), self.DOT * 1.5)
+            grad.setColorAt(0.0, base.lighter(122))
+            grad.setColorAt(1.0, base)
+            q.setPen(Qt.NoPen)
+            q.setBrush(QBrush(grad))
+            q.drawEllipse(c, self.DOT, self.DOT)
+            q.end()
+            self.sprites[key] = pm
+        return pm
 
     def paintEvent(self, _):
         if not self.slices:
             return
         p = QPainter(self)
-        p.setRenderHints(QPainter.Antialiasing)
+        p.setRenderHints(QPainter.SmoothPixmapTransform | QPainter.Antialiasing)
         cx, cy = self.width() / 2, self.height() / 2
         n = len(self.pts)
         dim = max(self.pops) if self.pops else 0.0
+        full = 2 * self.DOT + 2
+        sprites = [self.sprite(sl[2]) for sl in self.slices]
         for idx, (x, y) in enumerate(self.pts):
-            appear = min(1.0, max(0.0, (self._sweep * (n + 12) - idx) / 12))
+            appear = min(1.0, max(0.0, (self._sweep * (n + 16) - idx) / 16))
             if appear <= 0:
                 continue
             g = self.owner[idx]
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
-            r = self.DOT * (1 - (1 - appear) ** 3) * (1 + 0.3 * pop)
-            color = QColor(self.slices[g][2])
-            color.setAlphaF(1.0 - 0.6 * dim * (1 - pop))
-            c = QPointF(cx + x, cy + y)
-            grad = QRadialGradient(QPointF(c.x() - r * 0.3, c.y() - r * 0.35), r * 1.5)
-            grad.setColorAt(0.0, color.lighter(122))
-            grad.setColorAt(1.0, color)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(grad))
-            p.drawEllipse(c, r, r)
+            side = full * (1 - (1 - appear) ** 3) * (1 + 0.12 * pop)
+            p.setOpacity(1.0 - 0.4 * dim * (1 - pop))
+            p.drawPixmap(QRectF(cx + x - side / 2, cy + y - side / 2, side, side), sprites[g],
+                         QRectF(sprites[g].rect()))
 
     def _hit(self, pos):
         if self._sweep < 1.0:
@@ -1272,6 +1317,8 @@ def _clear_layout(layout):
 class DrivePanel(QWidget):
     """Details for one drive: a 3D pie plus the stats that matter (used/free, breakdown, biggest folders)."""
 
+    HINT = "Hover a group for details"
+
     def __init__(self):
         super().__init__()
         lay = QHBoxLayout(self)
@@ -1282,12 +1329,17 @@ class DrivePanel(QWidget):
         self.pie = DotPie()
         self.pie.hovered.connect(self._hover)
         self.caption = QLabel("")
-        self.caption.setObjectName("muted")
         self.caption.setAlignment(Qt.AlignCenter)
         self.caption.setFixedWidth(260)
-        self.caption.setStyleSheet("font-size: 14px;")
+        self.caption.setStyleSheet("font-size: 16px; font-weight: 600;")
+        self.detail = QLabel("")
+        self.detail.setObjectName("muted")
+        self.detail.setAlignment(Qt.AlignCenter)
+        self.detail.setFixedSize(260, 22)
+        self.detail.setStyleSheet("font-size: 14px;")
         left.addWidget(self.pie, 0, Qt.AlignHCenter)
         left.addWidget(self.caption, 0, Qt.AlignHCenter)
+        left.addWidget(self.detail, 0, Qt.AlignHCenter)
         left.addStretch()
         lay.addLayout(left)
         self.right = QVBoxLayout()
@@ -1304,12 +1356,12 @@ class DrivePanel(QWidget):
 
     def _hover(self, idx):
         if idx < 0:
-            self.caption.setText(self.default_caption)
-            self.caption.setStyleSheet("font-size: 14px;")
+            self.detail.setText(self.HINT)
+            self.detail.setStyleSheet("font-size: 14px;")
             return
         name, size, _ = self.pie.slices[idx]
-        self.caption.setText(f"{name}  ·  {apps.human(size)}  ·  {self._pct(size)}")
-        self.caption.setStyleSheet("font-size: 14px; color: #ffffff;")
+        self.detail.setText(f"{name}  ·  {apps.human(size)}  ·  {self._pct(size)}")
+        self.detail.setStyleSheet("font-size: 14px; color: #ffffff;")
 
     def _pct(self, size):
         v = size / self.total * 100 if self.total else 0
@@ -1379,11 +1431,11 @@ class DrivePanel(QWidget):
         h.addWidget(sz)
         return w
 
-    def set_data(self, total, free, categories, folders, installed, scanning=False):
+    def set_data(self, total, free, categories, folders, installed, scanning=False, name=""):
         used = max(0, total - free)
         self.total = total
-        self.default_caption = f"{apps.human(total)} drive" if not scanning else "Scanning..."
-        self.caption.setText(self.default_caption)
+        self.caption.setText(f"{name}  ·  {apps.human(free)} free" if name else f"{apps.human(free)} free")
+        self.detail.setText("Scanning..." if scanning else self.HINT)
         if categories:
             slices = [(n, s, CATEGORY_COLORS[n]) for n, s in categories]
         else:
@@ -1490,6 +1542,18 @@ class DriveItem(QWidget):
         for _ in range(2):
             QApplication.sendPostedEvents(None, QEvent.LayoutRequest)
 
+    def set_data(self, *args, **kw):
+        """Remember the latest numbers; the panel (about forty widgets) is only built when it is shown,
+        so loading the page and finishing scans no longer pay for panels nobody opened."""
+        self._args, self._kw, self._dirty = args, kw, True
+        if self.is_open:
+            self._apply()
+
+    def _apply(self):
+        if getattr(self, "_dirty", False):
+            self._dirty = False
+            self.panel.set_data(*self._args, **self._kw)
+
     def sync(self):
         """Panel content changed (scan finished): keep an open panel sized to it."""
         if self.is_open and self.anim.state() != QVariantAnimation.Running:
@@ -1532,6 +1596,8 @@ class DriveItem(QWidget):
         if on == self.is_open:
             return
         self.is_open = on
+        if on:
+            self._apply()
         if on:  # one drive open at a time
             parent = self.parentWidget()
             for other in (parent.findChildren(DriveItem) if parent else []):
@@ -4514,11 +4580,11 @@ class Kernel(QWidget):
         if not info:
             return
         res = self.drive_results.get(root)
-        info["item"].panel.set_data(info["total"], info["free"],
+        info["item"].set_data(info["total"], info["free"],
                                     res.get("categories", []) if res else [],
                                     res.get("root", []) if res else [],
                                     res.get("apps", []) if res else [],
-                                    scanning=res is None)
+                                    scanning=res is None, name=info["row"].title)
         QTimer.singleShot(0, info["item"].sync)
 
     def apply_usage(self, root, res):
