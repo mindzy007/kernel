@@ -18,7 +18,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QFontMetricsF, QIcon, QTransform, QImage, QLinearGradient,
-    QPainter, QPainterPath, QPen, QPixmap, QRadialGradient, QRegion,
+    QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient, QRegion,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsEffect,
@@ -1088,6 +1088,463 @@ class Row(HoverFrame):
         self.right.setSpacing(8)
         self.right.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         lay.addLayout(self.right)
+
+
+class Pie3D(QWidget):
+    """Tilted 3D pie. Grows in when its data changes; hovering a slice pops it out."""
+    hovered = Signal(int)
+    DEPTH, TILT = 16, 0.5
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(260, 178)
+        self.setMouseTracking(True)
+        self.slices = []  # (name, bytes, "#rrggbb")
+        self._sweep, self.hover, self.pops = 1.0, -1, []
+        self.sweep_anim = QVariantAnimation(self)
+        self.sweep_anim.setDuration(850)
+        self.sweep_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.sweep_anim.valueChanged.connect(self._set_sweep)
+        self.tick = QTimer(self)  # eases every slice toward its pop target, so hover never snaps
+        self.tick.setInterval(15)
+        self.tick.timeout.connect(self._ease)
+
+    def _set_sweep(self, v):
+        self._sweep = float(v)
+        self.update()
+
+    def _ease(self):
+        busy = False
+        for i, v in enumerate(self.pops):
+            target = 1.0 if i == self.hover else 0.0
+            v += (target - v) * 0.2
+            if abs(target - v) < 0.004:
+                v = target
+            else:
+                busy = True
+            self.pops[i] = v
+        if not busy:
+            self.tick.stop()
+        self.update()
+
+    def replay(self):
+        self.sweep_anim.stop()
+        self.sweep_anim.setStartValue(0.0)
+        self.sweep_anim.setEndValue(1.0)
+        self.sweep_anim.start()
+
+    def set_slices(self, slices):
+        slices = [s for s in slices if s[1] > 0]
+        if slices == self.slices:
+            return
+        self.slices = slices
+        self.pops = [0.0] * len(slices)
+        self.hover = -1
+        self.replay()
+
+    def _geom(self):
+        w, h = self.width(), self.height()
+        rx = min(w / 2 - 14, (h - self.DEPTH - 22) / (2 * self.TILT))
+        return w / 2, (h - self.DEPTH) / 2, rx, rx * self.TILT
+
+    def _spans(self):
+        total = sum(s[1] for s in self.slices) or 1
+        out, acc = [], 0
+        for _, size, _ in self.slices:
+            out.append((acc / total, (acc + size) / total))
+            acc += size
+        return out
+
+    def _arc(self, f0, f1, ox, oy):
+        cx, cy, rx, ry = self._geom()
+        a0, a1 = f0 * self._sweep, f1 * self._sweep
+        n = max(2, int((a1 - a0) * 120) + 2)
+        pts = []
+        for i in range(n + 1):
+            t = math.pi / 2 - (a0 + (a1 - a0) * i / n) * 2 * math.pi
+            pts.append((cx + ox + rx * math.cos(t), cy + oy - ry * math.sin(t), t))
+        return pts
+
+    def _offset(self, i, f0, f1):
+        pop = self.pops[i] if i < len(self.pops) else 0.0
+        if pop <= 0:
+            return 0.0, 0.0
+        pop = pop * pop * (3 - 2 * pop)  # smoothstep
+        t = math.pi / 2 - (f0 + f1) / 2 * self._sweep * 2 * math.pi
+        return math.cos(t) * 9 * pop, -math.sin(t) * 5 * pop
+
+    def paintEvent(self, _):
+        if not self.slices:
+            return
+        p = QPainter(self)
+        p.setRenderHints(QPainter.Antialiasing)
+        cx, cy, rx, ry = self._geom()
+        p.setPen(Qt.NoPen)
+        for grow, alpha in ((1.10, 7), (1.04, 9)):  # faint glow under the pie
+            p.setBrush(QColor(255, 255, 255, alpha))
+            p.drawEllipse(QRectF(cx - rx * grow, cy + self.DEPTH * 0.6 - ry * grow, rx * 2 * grow, ry * 2 * grow))
+        spans = self._spans()
+        order = sorted(range(len(spans)), key=lambda i: self.pops[i])  # raised slices paint last
+        for i in order:  # sides first: they only show where they face the viewer
+            f0, f1 = spans[i]
+            ox, oy = self._offset(i, f0, f1)
+            side = QColor(self.slices[i][2]).darker(165)
+            p.setPen(QPen(side, 1))
+            p.setBrush(side)
+            run = []
+            for x, y, t in self._arc(f0, f1, ox, oy) + [(0, 0, 1.0)]:
+                if math.sin(t) <= 0.001 and (x or y):
+                    run.append((x, y))
+                    continue
+                if len(run) > 1:
+                    p.drawPolygon(QPolygonF([QPointF(a, b) for a, b in run]
+                                            + [QPointF(a, b + self.DEPTH) for a, b in reversed(run)]))
+                run = []
+        for i in order:
+            f0, f1 = spans[i]
+            ox, oy = self._offset(i, f0, f1)
+            color = QColor(self.slices[i][2])
+            g = QLinearGradient(0, cy - ry, 0, cy + ry)
+            g.setColorAt(0.0, color.lighter(118))
+            g.setColorAt(1.0, color)
+            p.setPen(QPen(QColor(8, 8, 8, 210), 1.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setBrush(QBrush(g))
+            p.drawPolygon(QPolygonF([QPointF(cx + ox, cy + oy)] + [QPointF(x, y) for x, y, _ in self._arc(f0, f1, ox, oy)]))
+
+    def _hit(self, pos):
+        cx, cy, rx, ry = self._geom()
+        u, v = (pos.x() - cx) / rx, (cy - pos.y()) / ry
+        if self._sweep < 1.0 or u * u + v * v > 1.0:
+            return -1
+        frac = ((math.pi / 2 - math.atan2(v, u)) / (2 * math.pi)) % 1.0
+        for i, (f0, f1) in enumerate(self._spans()):
+            if f0 <= frac < f1:
+                return i
+        return -1
+
+    def _set_hover(self, idx):
+        if idx == self.hover:
+            return
+        self.hover = idx
+        if not self.tick.isActive():
+            self.tick.start()
+        self.hovered.emit(idx)
+
+    def mouseMoveEvent(self, e):
+        self._set_hover(self._hit(e.position()))
+
+    def leaveEvent(self, e):
+        self._set_hover(-1)
+
+
+class ChevronIcon(QWidget):
+    """Small arrow that turns from right to down as a drive panel opens."""
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(20, 20)
+        self._t = 0.0
+        self.anim = QVariantAnimation(self)
+        self.anim.setDuration(260)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.valueChanged.connect(self._set)
+
+    def _set(self, v):
+        self._t = float(v)
+        self.update()
+
+    def set_open(self, on):
+        self.anim.stop()
+        self.anim.setStartValue(self._t)
+        self.anim.setEndValue(1.0 if on else 0.0)
+        self.anim.start()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.translate(self.width() / 2, self.height() / 2)
+        p.rotate(90 * self._t)
+        p.setPen(QPen(QColor(150, 150, 150), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.drawPolyline(QPolygonF([QPointF(-2.5, -5), QPointF(2.5, 0), QPointF(-2.5, 5)]))
+
+
+def _clear_layout(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget():
+            item.widget().deleteLater()
+        elif item.layout():
+            _clear_layout(item.layout())
+
+
+class DrivePanel(QWidget):
+    """Details for one drive: a 3D pie plus the stats that matter (used/free, breakdown, biggest folders)."""
+
+    def __init__(self):
+        super().__init__()
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(26, 22, 26, 22)
+        lay.setSpacing(36)
+        left = QVBoxLayout()
+        left.setSpacing(12)
+        self.pie = Pie3D()
+        self.pie.hovered.connect(self._hover)
+        self.caption = QLabel("")
+        self.caption.setObjectName("muted")
+        self.caption.setAlignment(Qt.AlignCenter)
+        self.caption.setFixedWidth(260)
+        self.caption.setStyleSheet("font-size: 14px;")
+        left.addWidget(self.pie, 0, Qt.AlignHCenter)
+        left.addWidget(self.caption, 0, Qt.AlignHCenter)
+        left.addStretch()
+        lay.addLayout(left)
+        self.right = QVBoxLayout()
+        self.right.setSpacing(16)
+        lay.addLayout(self.right, 1)
+        self.default_caption, self.total = "", 0
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 9))
+        p.drawRoundedRect(QRectF(self.rect()), 14, 14)
+
+    def _hover(self, idx):
+        if idx < 0:
+            self.caption.setText(self.default_caption)
+            self.caption.setStyleSheet("font-size: 14px;")
+            return
+        name, size, _ = self.pie.slices[idx]
+        self.caption.setText(f"{name}  ·  {apps.human(size)}  ·  {self._pct(size)}")
+        self.caption.setStyleSheet("font-size: 14px; color: #ffffff;")
+
+    def _pct(self, size):
+        v = size / self.total * 100 if self.total else 0
+        return "<1%" if 0 < v < 1 else f"{v:.0f}%"
+
+    def _stat(self, label, value, sub):
+        box = QVBoxLayout()
+        box.setSpacing(4)
+        a = QLabel(label)
+        a.setObjectName("muted")
+        b = QLabel(value)
+        b.setStyleSheet("font-size: 22px;")
+        c = QLabel(sub)
+        c.setObjectName("muted")
+        for w in (a, b, c):
+            box.addWidget(w)
+        return box
+
+    def _heading(self, text):
+        h = QLabel(text)
+        h.setObjectName("muted")
+        h.setStyleSheet("font-size: 13px; letter-spacing: 1px;")
+        return h
+
+    def _line(self, color, name, size, pct):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(12)
+        dot = QLabel("\u25cf")
+        dot.setStyleSheet(f"color: {color}; font-size: 12px;")
+        nm = QLabel(name)
+        nm.setStyleSheet("font-size: 15px;")
+        sz = QLabel(size)
+        sz.setStyleSheet("font-size: 15px;")
+        sz.setFixedWidth(96)
+        sz.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        pc = QLabel(pct)
+        pc.setObjectName("muted")
+        pc.setFixedWidth(46)
+        pc.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        for x in (dot, nm):
+            h.addWidget(x)
+        h.addStretch()
+        h.addWidget(sz)
+        h.addWidget(pc)
+        return w
+
+    def _folder(self, name, size, frac, color):
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(14)
+        nm = ElidedLabel(name)
+        nm.setStyleSheet("font-size: 15px;")
+        bar = Bar()
+        bar.setFixedHeight(6)
+        bar.setFixedWidth(110)
+        bar.set_value(0.0)
+        bar.set_segments([(max(frac, 0.03), color)])
+        sz = QLabel(apps.human(size))
+        sz.setStyleSheet("font-size: 15px;")
+        sz.setFixedWidth(96)
+        sz.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        h.addWidget(nm, 1)
+        h.addWidget(bar)
+        h.addWidget(sz)
+        return w
+
+    def set_data(self, total, free, categories, folders, installed, scanning=False):
+        used = max(0, total - free)
+        self.total = total
+        self.default_caption = f"{apps.human(total)} drive" if not scanning else "Scanning..."
+        self.caption.setText(self.default_caption)
+        if categories:
+            slices = [(n, s, CATEGORY_COLORS[n]) for n, s in categories]
+        else:
+            slices = [("Used", used, "#cfcfcf")]
+        self.pie.set_slices(slices + [("Free", free, "#34343b")])
+        _clear_layout(self.right)
+        pct = round(used / total * 100) if total else 0
+        stats = QHBoxLayout()
+        stats.setSpacing(34)
+        stats.addLayout(self._stat("Used", apps.human(used), f"{pct}% of drive"))
+        stats.addLayout(self._stat("Free", apps.human(free), f"{100 - pct}% available"))
+        if installed:
+            stats.addLayout(self._stat("Apps & games", apps.human(sum(a["size"] for a in installed)),
+                                       f"{len(installed)} installed"))
+        stats.addStretch()
+        self.right.addLayout(stats)
+        if categories:
+            self.right.addSpacing(2)
+            self.right.addWidget(self._heading("BREAKDOWN"))
+            col = QVBoxLayout()
+            col.setSpacing(9)
+            for name, size, color in self.pie.slices:
+                col.addWidget(self._line(color, name, apps.human(size), self._pct(size)))
+            self.right.addLayout(col)
+        folders = [f for f in folders if f[1] > 0][:5]
+        if folders:
+            self.right.addSpacing(2)
+            self.right.addWidget(self._heading("BIGGEST FOLDERS"))
+            col = QVBoxLayout()
+            col.setSpacing(9)
+            top = folders[0][1] or 1
+            for path, size, _ in folders:
+                name = os.path.basename(path.rstrip("\\")) or path
+                color = CATEGORY_COLORS[storage._top_category(name)]
+                col.addWidget(self._folder(name, size, size / top, color))
+            self.right.addLayout(col)
+        self.right.addStretch()
+
+
+class DriveRow(Row):
+    """Drive line that opens its detail panel when clicked."""
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(e)
+
+
+class RevealBox(QWidget):
+    """Clips a child that always keeps its full size, so opening/closing only reveals it (no reflow)."""
+    TOP, BOTTOM = 4, 10
+
+    def __init__(self, child):
+        super().__init__()
+        self.child = child
+        child.setParent(self)
+        self.setFixedHeight(0)
+        self.hide()
+        self._full = 0
+
+    def full_height(self):
+        """Height of the fully open panel. Measured once per open/content change, never per frame."""
+        self.child.layout().activate()
+        self._full = self.child.sizeHint().height() + self.TOP + self.BOTTOM
+        return self._full
+
+    def resizeEvent(self, e):
+        self.layout_child()
+
+    def layout_child(self):
+        full = self._full or self.full_height()
+        self.child.setGeometry(0, self.TOP, self.width(), full - self.TOP - self.BOTTOM)
+
+
+class DriveItem(QWidget):
+    """A drive row with a detail panel that slides open beneath it."""
+
+    holders, owned = 0, False  # animations currently pausing the title bar / pill blur grabs
+
+    def __init__(self, row):
+        super().__init__()
+        self.row, self.is_open, self.holding = row, False, False
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(row)
+        self.panel = DrivePanel()
+        self.wrap = RevealBox(self.panel)
+        lay.addWidget(self.wrap)
+        self.chevron = ChevronIcon()
+        row.right.addWidget(self.chevron)
+        row.setCursor(Qt.PointingHandCursor)
+        row.clicked.connect(self.toggle)
+        self.anim = QVariantAnimation(self)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.valueChanged.connect(self._step)
+        self.anim.finished.connect(self._done)
+
+    def _step(self, v):
+        """One frame of the slide. Qt normally re-lays the page out a moment after a size change, so for a
+        frame or two this drive's row was handed the slack and stretched (its text jumped around).
+        Flushing the pending layout requests now keeps every row exactly where it belongs each frame."""
+        self.wrap.setFixedHeight(int(v))
+        for _ in range(4):
+            QApplication.sendPostedEvents(None, QEvent.LayoutRequest)
+
+    def sync(self):
+        """Panel content changed (scan finished): keep an open panel sized to it."""
+        if self.is_open and self.anim.state() != QVariantAnimation.Running:
+            self.wrap.setFixedHeight(self.wrap.full_height())
+            self.wrap.layout_child()
+
+    def hold_blur(self, on):
+        """The title bar and floating pill re-grab and re-blur the whole page whenever it changes or scrolls.
+        Doing that on every frame of the slide made it stutter and the content shimmer, so it pauses
+        (the same switch window drags use) and refreshes once when the slide ends."""
+        if on == self.holding:
+            return
+        self.holding = on
+        DriveItem.holders += 1 if on else -1
+        if on and DriveItem.holders == 1 and not WindowState.moving:
+            WindowState.moving = DriveItem.owned = True
+        elif not on and DriveItem.holders == 0 and DriveItem.owned:
+            WindowState.moving = DriveItem.owned = False
+            win = self.window()
+            if hasattr(win, "titlebar"):
+                win.titlebar.schedule()
+            if hasattr(win, "refresh_pill_backdrop"):
+                win.refresh_pill_backdrop()
+
+    def toggle(self):
+        self.is_open = not self.is_open
+        self.chevron.set_open(self.is_open)
+        self.hold_blur(True)
+        self.anim.stop()
+        start = self.wrap.height() if self.wrap.isVisible() else 0
+        if self.is_open:
+            self.wrap.show()
+            self.panel.pie.replay()
+            end = self.wrap.full_height()
+        else:
+            end = 0
+            self.wrap.full_height()
+        self.anim.setDuration(340 if self.is_open else 260)
+        self.anim.setStartValue(start)
+        self.anim.setEndValue(end)
+        self.anim.start()
+
+    def _done(self):
+        if not self.is_open:
+            self.wrap.hide()
+        self.hold_blur(False)
 
 
 class MetricCard(QFrame):
@@ -3911,6 +4368,7 @@ class Kernel(QWidget):
         self.apps_expanded = False
         self.apps_anim = self.apps_extra = self.apps_more = None
         self.drive_rows = {}
+        self.drive_results = {}
         self.storage_ready.connect(self.show_usage)
         self.scan_finished.connect(lambda: self.rescan_btn.setEnabled(True))
         self.drives_ready.connect(self.show_drives)
@@ -3935,24 +4393,31 @@ class Kernel(QWidget):
             self.drive_rows = {}
             self.storage_apps = {}
             for root, label, free, total in items:
-                row = Row(f"{label} ({root[:2]})", "")
+                row = DriveRow(f"{label} ({root[:2]})", "")
+                row.text_col.setSpacing(7)  # more air between the name, usage line and legend
+                spaced = row.sub.font()
+                spaced.setLetterSpacing(QFont.AbsoluteSpacing, 0.3)
+                row.sub.setFont(spaced)
                 legend = QLabel("")
                 legend.setTextFormat(Qt.RichText)
                 legend.setWordWrap(True)
                 legend.setStyleSheet("font-size: 13px;")
+                legend.setFont(spaced)
                 row.text_col.addWidget(legend)
                 bar = Bar()
                 bar.setFixedHeight(14)
                 bar.setMinimumWidth(300)
                 row.right.addWidget(bar)
-                self.drive_box.addWidget(row)
-                self.drive_rows[root] = {"row": row, "bar": bar, "legend": legend, "legend_html": "",
+                item = DriveItem(row)
+                self.drive_box.addWidget(item)
+                self.drive_rows[root] = {"row": row, "item": item, "bar": bar, "legend": legend, "legend_html": "",
                                          "total": total, "free": free}
         cached = None if self.scan_force else storage.load_cache(
             os.path.join(self.cfg.dir, "storage_cache.json"), roots)
         for root, label, free, total in items:
             info = self.drive_rows[root]
             info.update(total=total, free=free)
+            self.refresh_panel(root)
             info["row"].sub.setText(f"{apps.human(total - free)} used · {apps.human(free)} free of {apps.human(total)}")
             info["row"].sub.show()
             if cached:
@@ -4013,7 +4478,7 @@ class Kernel(QWidget):
         parts = [f'<span style="color:{CATEGORY_COLORS[name]}">●</span>&nbsp;{name}&nbsp;{apps.human(size)}'
                  for name, size in categories]
         parts.append(f'<span style="color:#3a3a3a">●</span>&nbsp;Free&nbsp;{apps.human(info["free"])}')
-        info["legend_html"] = "&nbsp;&nbsp;&nbsp;".join(parts)
+        info["legend_html"] = "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;".join(parts)
         info["legend"].setText(info["legend_html"])
     def uninstall_app(self, app, btn):
         if app["uri"]:
@@ -4030,9 +4495,23 @@ class Kernel(QWidget):
         btn.setText("Uninstall")
         subprocess.Popen(app["command"], shell=True)
 
+    def refresh_panel(self, root):
+        info = self.drive_rows.get(root)
+        if not info:
+            return
+        res = self.drive_results.get(root)
+        info["item"].panel.set_data(info["total"], info["free"],
+                                    res.get("categories", []) if res else [],
+                                    res.get("root", []) if res else [],
+                                    res.get("apps", []) if res else [],
+                                    scanning=res is None)
+        QTimer.singleShot(0, info["item"].sync)
+
     def apply_usage(self, root, res):
+        self.drive_results[root] = res
         self.show_drive_breakdown(root, res.get("categories", []))
         self.storage_apps[root] = res.get("apps", [])
+        self.refresh_panel(root)
         if res.get("skipped") and root in self.drive_rows:
             self.drive_rows[root]["legend"].setText(
                 '<span style="color:#8a8a8a">Removable drive, not scanned</span>')
