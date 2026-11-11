@@ -956,6 +956,32 @@ def version_tuple(v):
 ROW_TEXT_GAP = 48
 
 
+class PillLabel(QWidget):
+    """Small fully-rounded, antialiased badge."""
+
+    def __init__(self, text, rgb=(255, 98, 104)):
+        super().__init__()
+        self.text, self.rgb = text, rgb
+        f = QFont(self.font())
+        f.setPixelSize(13)
+        f.setWeight(QFont.Medium)
+        self.setFont(f)
+        fm = QFontMetrics(f)
+        self.setFixedSize(fm.horizontalAdvance(text) + 22, fm.height() + 6)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        rad = r.height() / 2
+        p.setBrush(QColor(*self.rgb, 26))
+        p.setPen(QPen(QColor(*self.rgb, 80), 1))
+        p.drawRoundedRect(r, rad, rad)
+        p.setPen(QColor(229, 120, 125))
+        p.drawText(self.rect(), Qt.AlignCenter, self.text)
+
+
 class Row(HoverFrame):
     def __init__(self, title, subtitle="", icon=None, right_margin=16):
         super().__init__()
@@ -978,7 +1004,11 @@ class Row(HoverFrame):
         self.sub.setWordWrap(True)
         if not subtitle:
             self.sub.hide()
-        text.addWidget(t)
+        self.title_row = QHBoxLayout()
+        self.title_row.setSpacing(10)
+        self.title_row.addWidget(t)
+        self.title_row.addStretch(1)
+        text.addLayout(self.title_row)
         text.addWidget(self.sub)
         self.text_col = text
         lay.addWidget(text_box, 1)
@@ -1038,6 +1068,10 @@ class TaskRow(Row):
             self.revert.setEnabled(False)
             self.reversible = False
             self.right.addWidget(self.revert)
+        if not self.reversible and self.apply is not None:
+            warn = PillLabel("Cannot be reverted")
+            self.title_row.insertWidget(1, warn)
+            self.sub.setText(self.sub.text().replace(" This cannot be reverted.", "").replace("This cannot be reverted.", "").strip())
         self.toggle = None
         if on_apply is None:  # a row without an Apply button (Settings) is controlled by its switch
             self.toggle = Toggle()

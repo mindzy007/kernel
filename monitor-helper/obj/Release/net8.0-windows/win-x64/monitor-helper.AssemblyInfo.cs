@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("kernel-monitor")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+193fab3c4953afca8a1f6d303903ec91f94bf65c")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+5ac8e375512375f1a7d58e260791db2ef18abb29")]
 [assembly: System.Reflection.AssemblyProductAttribute("kernel-monitor")]
 [assembly: System.Reflection.AssemblyTitleAttribute("kernel-monitor")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
