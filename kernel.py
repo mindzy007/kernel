@@ -1335,13 +1335,13 @@ class DrivePanel(QWidget):
         v = size / self.total * 100 if self.total else 0
         return "<1%" if 0 < v < 1 else f"{v:.0f}%"
 
-    def _stat(self, label, value, sub):
+    def _stat(self, label, value, sub, color="#ffffff"):
         box = QVBoxLayout()
         box.setSpacing(4)
         a = QLabel(label)
         a.setObjectName("muted")
         b = QLabel(value)
-        b.setStyleSheet("font-size: 22px;")
+        b.setStyleSheet(f"font-size: 23px; font-weight: 700; color: {color};")
         c = QLabel(sub)
         c.setObjectName("muted")
         for w in (a, b, c):
@@ -1413,11 +1413,11 @@ class DrivePanel(QWidget):
         pct = round(used / total * 100) if total else 0
         stats = QHBoxLayout()
         stats.setSpacing(34)
-        stats.addLayout(self._stat("Used", apps.human(used), f"{pct}% of drive"))
-        stats.addLayout(self._stat("Free", apps.human(free), f"{100 - pct}% available"))
+        stats.addLayout(self._stat("Used", apps.human(used), f"{pct}% of drive", "#ff9f0a"))
+        stats.addLayout(self._stat("Free", apps.human(free), f"{100 - pct}% available", "#30d158"))
         if installed:
             stats.addLayout(self._stat("Apps & games", apps.human(sum(a["size"] for a in installed)),
-                                       f"{len(installed)} installed"))
+                                       f"{len(installed)} installed", "#0a84ff"))
         stats.addStretch()
         self.right.addLayout(stats)
         if categories:
