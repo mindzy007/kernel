@@ -1274,8 +1274,8 @@ class ChevronIcon(QWidget):
         self.setFixedSize(20, 20)
         self._t, self._dim = 0.0, False
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(280)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.setDuration(460)
+        self.anim.setEasingCurve(bezier_curve(0.32, 0.72, 0.0, 1.0))
         self.anim.valueChanged.connect(self._set)
 
     def _set(self, v):
@@ -1551,6 +1551,13 @@ class DriveRow(Row):
         super().mouseReleaseEvent(e)
 
 
+def bezier_curve(x1, y1, x2, y2):
+    """CSS-style cubic-bezier easing, e.g. bezier_curve(0.32, 0.72, 0, 1) is the soft iOS 'ease out'."""
+    c = QEasingCurve(QEasingCurve.BezierSpline)
+    c.addCubicBezierSegment(QPointF(x1, y1), QPointF(x2, y2), QPointF(1, 1))
+    return c
+
+
 class RevealBox(QWidget):
     """Clips a child that always keeps its full size, so opening/closing only reveals it (no reflow)."""
     TOP, BOTTOM = 4, 10
@@ -1574,7 +1581,7 @@ class RevealBox(QWidget):
 
     def layout_child(self):
         full = self._full or self.full_height()
-        self.child.setGeometry(0, self.TOP, self.width(), full - self.TOP - self.BOTTOM)
+        self.child.setGeometry(0, self.TOP, self.width(), full - self.TOP - self.BOTTOM)  # fixed: only revealed
 
 
 class DriveItem(QWidget):
@@ -1679,9 +1686,10 @@ class DriveItem(QWidget):
             end = self.wrap.full_height()
             self.panel.pie.hide_slices()
             # let the slide get going before the pie starts drawing, so the two never compete for frames
-            QTimer.singleShot(110, lambda: self.panel.pie.replay() if self.is_open else None)
-        self.anim.setEasingCurve(QEasingCurve.OutCubic)  # moves at full speed from the first frame
-        self.anim.setDuration(300 if on else 230)
+            QTimer.singleShot(160, lambda: self.panel.pie.replay() if self.is_open else None)
+        # soft iOS-style curve: quick first movement, long gentle landing
+        self.anim.setEasingCurve(bezier_curve(0.32, 0.72, 0.0, 1.0) if on else bezier_curve(0.4, 0.0, 0.2, 1.0))
+        self.anim.setDuration(560 if on else 380)
         self.anim.setStartValue(start)
         self.anim.setEndValue(end)
         self.anim.start()
