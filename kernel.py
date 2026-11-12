@@ -704,12 +704,13 @@ class Bar(QWidget):
         p.setPen(Qt.NoPen)
         if self._order:
             x = 0.0
-            for color, fraction in self.current().items():
-                seg = w * fraction
-                if seg > 0.5:
-                    p.setBrush(QColor(color))
-                    p.drawRect(QRectF(x, 0, seg - 2 if seg > 4 else seg, h))
+            shown = [(c, w * f) for c, f in self.current().items() if w * f > 0.5]
+            for n, (color, seg) in enumerate(shown):
+                p.setBrush(QColor(color))
+                # segments touch: each one runs 1px under its neighbour, so no sliver of track shows between them
+                p.drawRect(QRectF(x, 0, seg + (1 if n < len(shown) - 1 else 0), h))
                 x += seg
+            x = sum(seg for _, seg in shown)
         elif self.value >= 0:
             p.setBrush(QColor("#ffffff"))
             p.drawRect(QRectF(0, 0, w * min(self.value, 1.0), h))

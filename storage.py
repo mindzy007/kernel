@@ -196,11 +196,25 @@ def _reg_value(key, name):
         return None
 
 
-def _is_game(name, location):
-    low = f"{location or ''}\\".lower()
-    if "launcher" in name.lower() or name.lower() == "steam":
+# Publishers whose name gives a game away (matched as plain text inside the publisher field).
+GAME_PUBLISHERS = ("games", "gaming", "interactive", "entertainment", "studios", "valve", "electronic arts",
+                   "activision", "blizzard", "ubisoft", "rockstar", "bethesda", "cd projekt", "bandai", "square enix",
+                   "capcom", "sega", "konami", "take-two", "bungie", "mojang", "wargaming", "gaijin", "nexon",
+                   "hoyoverse", "mihoyo", "supercell")
+# Game stores, launchers and helper software: never shown as a game, whoever published them.
+NOT_GAMES = re.compile(r"\b(launcher|battle\.net|ea app|gog galaxy|ubisoft connect|origin|xbox|client|steam|"
+                       r"redistributable|runtime|easyanticheat|battleye)\b", re.I)
+
+
+def _is_game(name, location, publisher=""):
+    """A game if it lives in a known game-library folder, or its publisher is a game company."""
+    if NOT_GAMES.search(name):
         return False
-    return any(part in low for part in GAME_DIRS)
+    low = f"{location or ''}\\".lower()
+    if any(part in low for part in GAME_DIRS):
+        return True
+    pub = (publisher or "").lower()
+    return any(word in pub for word in GAME_PUBLISHERS)
 
 
 def _registry_apps():
@@ -306,7 +320,7 @@ def installed_apps():
             continue
         seen.add(key)
         it["size"] = size
-        it["game"] = _is_game(it["name"], it["location"]) or "\\xboxgames\\" in f"{it['location']}\\".lower()
+        it["game"] = _is_game(it["name"], it["location"], it["publisher"]) or "\\xboxgames\\" in f"{it['location']}\\".lower()
         kept.append(it)
     # Drop apps that merely contain other listed apps (a launcher holding its games, for example).
     paths = [_norm(it["location"]) + "\\" for it in kept if it["location"]]
