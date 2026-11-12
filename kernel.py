@@ -1177,27 +1177,38 @@ class DotPie(QWidget):
                 counts[i] = 1
         return counts
 
-    def _single_dots_outside(self):
-        """A category that is just one dot would vanish in the middle of the disc: swap it out to the nearest
-        spot on the outer ring (the dot it swaps with takes its old place, so every count stays the same)."""
-        def angle(i):
-            x, y = self.pts[i]
-            return math.atan2(x, -y) % (2 * math.pi)
-        outer_r = self.RINGS * self.SPACING - 0.01
-        outer = [i for i, (x, y) in enumerate(self.pts) if math.hypot(x, y) >= outer_r]
+    def _small_groups_outside(self):
+        """A group too small to reach the centre as a proper wedge (fewer than three spokes' worth of dots) would
+        be a lonely sliver in the middle. It is moved to the rim instead, as an arc around its own direction,
+        and the dots it swaps with fill the gap it left. Every group keeps exactly its number of dots."""
+        two_pi = 2 * math.pi
+        ang = lambda i: math.atan2(self.pts[i][0], -self.pts[i][1]) % two_pi
+        gap = lambda a, b: abs((a - b + math.pi) % two_pi - math.pi)
+        counts = {}
+        for o in self.owner:
+            counts[o] = counts.get(o, 0) + 1
+        rings = sorted({round(n, 4) for n in self.norm}, reverse=True)  # outermost first
         taken = set()
         for s in range(len(self.slices)):
+            if not 0 < counts.get(s, 0) <= 3 * self.RINGS:
+                continue
             mine = [i for i, o in enumerate(self.owner) if o == s]
-            if len(mine) != 1:
-                continue
-            here = mine[0]
-            best = min((i for i in outer if i not in taken),
-                       key=lambda i: abs((angle(i) - angle(here) + math.pi) % (2 * math.pi) - math.pi),
-                       default=None)
-            if best is None:
-                continue
-            taken.add(best)
-            self.owner[here], self.owner[best] = self.owner[best], s
+            theta = math.atan2(sum(math.sin(ang(i)) for i in mine), sum(math.cos(ang(i)) for i in mine)) % two_pi
+            want = []
+            for r in rings:  # fill the rim first, then the next ring in
+                row = sorted((i for i in range(len(self.pts)) if round(self.norm[i], 4) == r and i not in taken),
+                             key=lambda i: gap(ang(i), theta))
+                want += row[:len(mine) - len(want)]
+                if len(want) == len(mine):
+                    break
+            gone = [i for i in mine if i not in want]
+            incoming = [i for i in want if self.owner[i] != s]
+            displaced = [self.owner[i] for i in incoming]
+            for i, o in zip(gone, displaced):
+                self.owner[i] = o
+            for i in want:
+                self.owner[i] = s
+            taken.update(want)
 
     def set_slices(self, slices):
         slices = [s for s in slices if s[1] > 0]
@@ -1205,7 +1216,7 @@ class DotPie(QWidget):
             return
         self.slices = slices
         self.owner = [i for i, c in enumerate(self._allocate()) for _ in range(c)]
-        self._single_dots_outside()
+        self._small_groups_outside()
         self.pops = [0.0] * len(slices)
         self.hover = -1
         self.replay()

@@ -217,9 +217,30 @@ def _is_game(name, location, publisher=""):
     return any(word in pub for word in GAME_PUBLISHERS)
 
 
+def _words(text):
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 3 and not w.isdigit()}
+
+
+def _install_root(folder, name):
+    """The icon path usually points deep inside an app (...\\After Effects 2025\\Support Files). Climb to the
+    folder that is really the app's: the highest ancestor, still below Program Files and friends, whose name
+    covers most of the app's name. Without this such apps measured tiny and never made the list."""
+    words = _words(name)
+    if not words:
+        return folder
+    protected, best, cur = _protected_dirs(), folder, folder
+    while True:
+        parent = os.path.dirname(cur)
+        if not parent or parent == cur or _norm(parent) in protected or os.path.splitdrive(_norm(parent))[1] in ("", "\\"):
+            return best
+        cur = parent
+        if len(_words(os.path.basename(cur)) & words) / len(words) >= 0.6:
+            best = cur
+
+
 def _registry_apps():
-    wanted = ("DisplayName", "UninstallString", "InstallLocation", "DisplayIcon", "EstimatedSize",
-              "Publisher", "SystemComponent", "ParentKeyName", "ReleaseType")
+    wanted = ("DisplayName", "UninstallString", "QuietUninstallString", "InstallLocation", "DisplayIcon",
+              "EstimatedSize", "Publisher", "SystemComponent", "ParentKeyName", "ReleaseType")
     seen, out = set(), []
     for hive, path in UNINSTALL_KEYS:
         try:
@@ -234,7 +255,7 @@ def _registry_apps():
                 except OSError:
                     continue
                 name = " ".join(str(v["DisplayName"] or "").split())
-                command = v["UninstallString"]
+                command = v["UninstallString"] or v["QuietUninstallString"]
                 if (not name or not command or v["SystemComponent"] == 1 or v["ParentKeyName"]
                         or v["ReleaseType"] in ("Update", "Hotfix", "Security Update")
                         or re.match(r"(KB\d+|Update for|Security Update)", name) or name.lower() in seen):
@@ -245,6 +266,8 @@ def _registry_apps():
                     icon = _unquote_path(v["DisplayIcon"])
                     if icon:
                         location = os.path.dirname(icon) if os.path.splitext(icon)[1] else icon
+                        if location and _usable_location(location):
+                            location = _install_root(location, name)
                 if location and not _usable_location(location):
                     location = None
                 estimate = v["EstimatedSize"] * 1024 if isinstance(v["EstimatedSize"], int) else 0
@@ -316,19 +339,21 @@ def installed_apps():
     kept, seen = [], set()
     for it, size in sorted(zip(items, sizes), key=lambda p: p[1], reverse=True):
         key = _norm(it["location"]) if it["location"] else None
-        if size < MIN_APP_BYTES or key in seen:
+        if size < MIN_APP_BYTES or (key and key in seen):  # apps with no known folder never count as duplicates
             continue
         seen.add(key)
         it["size"] = size
         it["game"] = _is_game(it["name"], it["location"], it["publisher"]) or "\\xboxgames\\" in f"{it['location']}\\".lower()
         kept.append(it)
     # Drop apps that merely contain other listed apps (a launcher holding its games, for example).
-    paths = [_norm(it["location"]) + "\\" for it in kept if it["location"]]
+    inside = {_norm(it["location"]) + "\\": it["size"] for it in kept if it["location"]}
     result = []
     for it in kept:
         mine = _norm(it["location"]) + "\\" if it["location"] else None
-        if mine and any(p != mine and p.startswith(mine) for p in paths):
-            continue
+        if mine:
+            inner = sum(sz for p, sz in inside.items() if p != mine and p.startswith(mine))
+            if inner and inner >= 0.6 * it["size"]:  # mostly other listed apps: a launcher and its games
+                continue
         result.append(it)
     return result
 
