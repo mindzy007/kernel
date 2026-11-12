@@ -46,8 +46,9 @@ BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
 ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
            ("Green", "#4fd08a"), ("Amber", "#ffb454"), ("Red", "#ff6b6b"))
-CATEGORY_COLORS = {"Apps": "#0a84ff", "Games": "#bf5af2", "Documents & files": "#30d158",
-                   "System": "#ff9f0a", "Other": "#8e8e93"}
+CATEGORY_COLORS = {"Apps": "#0a84ff", "Games": "#30d158", "Documents & files": "#bf5af2",
+                   "System": "#8e8e93", "Other": "#ff9f0a"}
+FREE_COLOR = "#c8c8cd"  # free space: a soft off-white
 
 QSS = f"""
 * {{ font-family: 'Segoe UI Variable Text', 'Segoe UI'; color: {TEXT}; }}
@@ -619,6 +620,7 @@ class Bar(QWidget):
         self._scan = 0.0
         self.scanning = False
         self.setFixedHeight(5)
+        self.track_color = "#1f1f1f"
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update)
         self.morph_anim = QPropertyAnimation(self, b"morph", self)
@@ -697,7 +699,7 @@ class Bar(QWidget):
         w, h = self.width(), self.height()
         track = QPainterPath()
         track.addRoundedRect(QRectF(0, 0, w, h), h / 2.0, h / 2.0)
-        p.fillPath(track, QColor("#1f1f1f"))
+        p.fillPath(track, QColor(self.track_color))
         p.setClipPath(track)
         p.setPen(Qt.NoPen)
         if self._order:
@@ -1506,7 +1508,7 @@ class DrivePanel(QWidget):
             slices = [(n, s, CATEGORY_COLORS[n]) for n, s in categories]
         else:
             slices = [("Used", used, "#cfcfcf")]
-        self.pie.set_slices(slices + [("Free", free, "#46464f")])
+        self.pie.set_slices(slices + [("Free", free, FREE_COLOR)])
         _clear_layout(self.right)
         pct = round(used / total * 100) if total else 0
         stats = QHBoxLayout()
@@ -4632,10 +4634,11 @@ class Kernel(QWidget):
         if not categories:
             info["legend"].setText("")
             return
+        info["bar"].track_color = FREE_COLOR
         info["bar"].set_segments([(size / total, CATEGORY_COLORS[name]) for name, size in categories])
         parts = [f'<span style="color:{CATEGORY_COLORS[name]}">●</span>&nbsp;{name}&nbsp;{apps.human(size)}'
                  for name, size in categories]
-        parts.append(f'<span style="color:#3a3a3a">●</span>&nbsp;Free&nbsp;{apps.human(info["free"])}')
+        parts.append(f'<span style="color:{FREE_COLOR}">●</span>&nbsp;Free&nbsp;{apps.human(info["free"])}')
         info["legend_html"] = "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;".join(parts)
         info["legend"].setText(info["legend_html"])
     def uninstall_app(self, app, btn):
@@ -4700,9 +4703,9 @@ class Kernel(QWidget):
             link = PathChip(loc)
             link.clicked.connect(lambda path=loc: os.startfile(path))
             row.text_col.addWidget(link, 0, Qt.AlignLeft)
-        accent, text = {"Game": ((191, 90, 242), (214, 140, 255)),
+        accent, text = {"Game": ((48, 209, 88), (90, 225, 125)),
                         "App": ((10, 132, 255), (90, 170, 255)),
-                        "Store app": ((48, 209, 88), (90, 225, 125))}[kind]
+                        "Store app": ((191, 90, 242), (214, 140, 255))}[kind]
         row.title_row.insertWidget(1, PillLabel(kind, accent, text))
         bar = Bar()
         bar.setFixedHeight(8)

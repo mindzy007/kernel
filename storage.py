@@ -358,8 +358,11 @@ def categorize(root, entries, apps, used):
             moved = min(app["size"], cats[source])
             cats[source] -= moved
             cats[target] += moved
-    # Locked files and protected folders cannot be read; they are system reserved space.
-    cats["System"] += max(0, used - sum(cats.values()))
+    # Locked files and protected folders cannot be read; they are system reserved space. The reverse also
+    # happens: a folder walk counts every hard link (the Windows component store, WinSxS, is full of them)
+    # as a separate file, so Windows reads bigger than it is. Trim that surplus from System so the
+    # categories never add up to more than the drive actually uses.
+    cats["System"] = max(0, cats["System"] + used - sum(cats.values()))
     return [(name, cats[name]) for name in CATEGORIES if cats[name] > 0]
 
 
