@@ -1102,7 +1102,6 @@ class DotPie(QWidget):
         super().__init__()
         self.setFixedSize(260, 250)
         self.setMouseTracking(True)
-        self.sprites = {}
         self.slices = []  # (name, bytes, "#rrggbb")
         self.owner = []  # slice index of every dot, in clockwise order from the top
         self._sweep, self.hover, self.pops = 1.0, -1, []
@@ -1124,7 +1123,9 @@ class DotPie(QWidget):
         self.settle.setSingleShot(True)
         self.settle.timeout.connect(lambda: self._set_hover(self._pending))
         self.tick = QTimer(self)  # eases every group toward its hover target, so hover never snaps
-        self.tick.setInterval(15)
+        self.tick.setInterval(8)
+        self.tick.setTimerType(Qt.PreciseTimer)
+        self._last = time.perf_counter()
         self.tick.timeout.connect(self._ease)
 
     def _set_sweep(self, v):
@@ -1132,10 +1133,13 @@ class DotPie(QWidget):
         self.update()
 
     def _ease(self):
+        now = time.perf_counter()  # ease by real elapsed time, so it is equally smooth at any frame rate
+        k = 1 - math.exp(-min(now - self._last, 0.05) / 0.09)
+        self._last = now
         busy = False
         for i, v in enumerate(self.pops):
             target = 1.0 if i == self.hover else 0.0
-            v += (target - v) * 0.13
+            v += (target - v) * k
             if abs(target - v) < 0.004:
                 v = target
             else:
@@ -1203,52 +1207,30 @@ class DotPie(QWidget):
         self.hover = -1
         self.replay()
 
-    def sprite(self, color):
-        """One pre-drawn, shaded dot per colour: painting 200 dots with fresh gradients every frame was the lag."""
-        dpr = self.devicePixelRatioF()
-        key = (color, dpr)
-        pm = self.sprites.get(key)
-        if pm is None:
-            side = 2 * self.DOT + 2
-            pm = QPixmap(int(math.ceil(side * dpr)), int(math.ceil(side * dpr)))
-            pm.setDevicePixelRatio(dpr)
-            pm.fill(Qt.transparent)
-            q = QPainter(pm)
-            q.setRenderHints(QPainter.Antialiasing)
-            c = QPointF(side / 2, side / 2)
-            base = QColor(color)
-            grad = QRadialGradient(QPointF(c.x() - self.DOT * 0.3, c.y() - self.DOT * 0.35), self.DOT * 1.5)
-            grad.setColorAt(0.0, base.lighter(122))
-            grad.setColorAt(1.0, base)
-            q.setPen(Qt.NoPen)
-            q.setBrush(QBrush(grad))
-            q.drawEllipse(c, self.DOT, self.DOT)
-            q.end()
-            self.sprites[key] = pm
-        return pm
-
     def paintEvent(self, _):
         if not self.slices:
             return
         p = QPainter(self)
-        p.setRenderHints(QPainter.SmoothPixmapTransform | QPainter.Antialiasing)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
         cx, cy = self.width() / 2, self.height() / 2
-        n = len(self.pts)
         dim = max(self.pops) if self.pops else 0.0
-        full = 2 * self.DOT + 2
-        sprites = [self.sprite(sl[2]) for sl in self.slices]
+        colors = [QColor(sl[2]) for sl in self.slices]
+        shine = QColor(255, 255, 255, 46)
         for idx, (x, y) in enumerate(self.pts):
-            appear = min(1.0, max(0.0, (self._sweep * 1.7 - self.norm[idx]) / 0.7))  # centre first, edge last, wide overlap
+            appear = min(1.0, max(0.0, (self._sweep * 1.7 - self.norm[idx]) / 0.7))  # centre first, edge last
             if appear <= 0:
                 continue
             g = self.owner[idx]
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
             grow = 1 + 1.6 * (appear - 1) ** 3 + 0.6 * (appear - 1) ** 2  # settles with a tiny overshoot
-            side = full * grow * (1 + 0.06 * pop)
+            r = self.DOT * grow * (1 + 0.06 * pop)
             p.setOpacity(min(1.0, appear * 2.0) * (1.0 - 0.3 * dim * (1 - pop)))
-            p.drawPixmap(QRectF(cx + x - side / 2, cy + y - side / 2, side, side), sprites[g],
-                         QRectF(sprites[g].rect()))
+            p.setBrush(colors[g])
+            p.drawEllipse(QPointF(cx + x, cy + y), r, r)
+            p.setBrush(shine)  # a soft highlight gives each dot a little volume
+            p.drawEllipse(QPointF(cx + x - r * 0.26, cy + y - r * 0.3), r * 0.52, r * 0.46)
 
     def _hit(self, pos):
         if self._sweep < 1.0:
@@ -1266,6 +1248,7 @@ class DotPie(QWidget):
             return
         self.hover = idx
         if not self.tick.isActive():
+            self._last = time.perf_counter()
             self.tick.start()
         self.hovered.emit(idx)
 
@@ -1327,52 +1310,68 @@ def _clear_layout(layout):
             _clear_layout(item.layout())
 
 
-class FadeText(QWidget):
-    """One centred line of text that cross-fades (and changes colour) when its text changes."""
-
-    def __init__(self, width, height, size=14):
-        super().__init__()
-        self.setFixedSize(width, height)
-        f = QFont(self.font())
-        f.setPixelSize(size)
-        self.setFont(f)
-        self.old = self.new = ("", QColor(MUTED))
-        self._t = 1.0
-        self.anim = QVariantAnimation(self)
-        self.anim.setDuration(260)
-        self.anim.setEasingCurve(QEasingCurve.InOutSine)
-        self.anim.valueChanged.connect(self._set)
-
-    def _set(self, v):
-        self._t = float(v)
-        self.update()
-
-    def set_text(self, text, color=MUTED):
-        color = QColor(color)
-        if (text, color) == self.new:
-            return
-        self.old = self.new  # what is showing right now fades out while the new text fades in
-        self.new = (text, color)
-        self.anim.stop()
-        self.anim.setStartValue(0.0)
-        self.anim.setEndValue(1.0)
-        self.anim.start()
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.TextAntialiasing)
-        for (text, color), alpha in ((self.old, 1.0 - self._t), (self.new, self._t)):
-            if alpha > 0.01 and text:
-                c = QColor(color)
-                c.setAlphaF(alpha)
-                p.setPen(c)
-                p.drawText(self.rect(), Qt.AlignCenter, text)
-
-
+class FadeText(QWidget):
+    """One centred line of text. When it changes, the old text fades out completely, then the new text fades in."""
+
+    def __init__(self, width, height, size=14):
+        super().__init__()
+        self.setFixedSize(width, height)
+        f = QFont(self.font())
+        f.setPixelSize(size)
+        self.setFont(f)
+        self.shown = self.target = ("", QColor(MUTED))
+        self._a, self.phase = 1.0, ""
+        self.anim = QVariantAnimation(self)
+        self.anim.setEasingCurve(QEasingCurve.InOutSine)
+        self.anim.valueChanged.connect(self._set)
+        self.anim.finished.connect(self._done)
+
+    def _set(self, v):
+        self._a = float(v)
+        self.update()
+
+    def _fade(self, end, ms):
+        self.anim.stop()
+        self.anim.setDuration(max(1, int(ms)))
+        self.anim.setStartValue(self._a)
+        self.anim.setEndValue(end)
+        self.anim.start()
+
+    def _done(self):
+        if self.phase == "out":  # fully faded out: swap the text, fade the new one in
+            self.shown, self.phase = self.target, "in"
+            self._fade(1.0, 170)
+        else:
+            self.phase = ""
+
+    def set_text(self, text, color=MUTED):
+        new = (text, QColor(color))
+        if new == self.target:
+            return
+        self.target = new
+        if not self.shown[0] or self.shown == new:
+            self.shown, self.phase = new, "in"
+            self._fade(1.0, 170)
+        else:
+            self.phase = "out"
+            self._fade(0.0, 110 * max(self._a, 0.25))
+
+    def paintEvent(self, _):
+        text, color = self.shown
+        if text and self._a > 0.01:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.TextAntialiasing)
+            c = QColor(color)
+            c.setAlphaF(self._a)
+            p.setPen(c)
+            p.drawText(self.rect(), Qt.AlignCenter, text)
+
+
 class DrivePanel(QWidget):
     """Details for one drive: a 3D pie plus the stats that matter (used/free, breakdown, biggest folders)."""
 
     HINT = "Hover a group for details"
+    LEFT_W = 340  # width of the pie column; the drive line is elided to fit it
 
     def __init__(self):
         super().__init__()
@@ -1385,9 +1384,12 @@ class DrivePanel(QWidget):
         self.pie.hovered.connect(self._hover)
         self.caption = QLabel("")
         self.caption.setAlignment(Qt.AlignCenter)
-        self.caption.setFixedWidth(260)
-        self.caption.setStyleSheet("font-size: 16px; font-weight: 600;")
-        self.detail = FadeText(260, 20)
+        self.caption.setFixedWidth(self.LEFT_W)
+        cap_font = QFont(self.caption.font())
+        cap_font.setPixelSize(15)
+        cap_font.setWeight(QFont.DemiBold)
+        self.caption.setFont(cap_font)
+        self.detail = FadeText(self.LEFT_W, 20)
         left.addWidget(self.pie, 0, Qt.AlignHCenter)
         left.addWidget(self.caption, 0, Qt.AlignHCenter)
         left.addWidget(self.detail, 0, Qt.AlignHCenter)
@@ -1483,7 +1485,8 @@ class DrivePanel(QWidget):
     def set_data(self, total, free, categories, folders, installed, scanning=False, name=""):
         used = max(0, total - free)
         self.total = total
-        self.caption.setText(f"{name}  ·  {apps.human(free)} free" if name else f"{apps.human(free)} free")
+        line = f"{name}  ·  {apps.human(free)} free" if name else f"{apps.human(free)} free"
+        self.caption.setText(QFontMetrics(self.caption.font()).elidedText(line, Qt.ElideRight, self.LEFT_W - 8))
         self.detail.set_text("Scanning..." if scanning else self.HINT, MUTED)
         if categories:
             slices = [(n, s, CATEGORY_COLORS[n]) for n, s in categories]
