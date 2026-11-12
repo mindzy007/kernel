@@ -1367,6 +1367,17 @@ class FadeText(QWidget):
             p.drawText(self.rect(), Qt.AlignCenter, text)
 
 
+def drive_capacity(total):
+    """Capacity the way it is sold: 2 TB, 512 GB (a '1863 GB' Windows size is really a 2 TB drive)."""
+    gb = total / 1e9
+    if gb >= 950:
+        tb = round(gb / 1000, 1)
+        return f"{tb:g} TB"
+    sizes = (32, 64, 120, 128, 240, 250, 256, 480, 500, 512, 960)
+    near = min(sizes, key=lambda x: abs(x - gb))
+    return f"{near if abs(near - gb) / near < 0.07 else round(gb)} GB"
+
+
 class DrivePanel(QWidget):
     """Details for one drive: a 3D pie plus the stats that matter (used/free, breakdown, biggest folders)."""
 
@@ -1469,7 +1480,7 @@ class DrivePanel(QWidget):
         nm = ElidedLabel(name)
         nm.setStyleSheet("font-size: 15px;")
         bar = Bar()
-        bar.setFixedHeight(6)
+        bar.setFixedHeight(8)
         bar.setFixedWidth(110)
         bar.set_value(0.0)
         bar.set_segments([(max(frac, 0.03), color)])
@@ -1485,7 +1496,10 @@ class DrivePanel(QWidget):
     def set_data(self, total, free, categories, folders, installed, scanning=False, name=""):
         used = max(0, total - free)
         self.total = total
-        line = f"{name}  ·  {apps.human(free)} free" if name else f"{apps.human(free)} free"
+        cap = drive_capacity(total)
+        squeezed = lambda t: t.replace(" ", "").lower()
+        # the model name often already says "2TB": don't repeat it
+        line = name if (name and squeezed(cap) in squeezed(name)) else (f"{name}  ·  {cap}" if name else cap)
         self.caption.setText(QFontMetrics(self.caption.font()).elidedText(line, Qt.ElideRight, self.LEFT_W - 8))
         self.detail.set_text("Scanning..." if scanning else self.HINT, MUTED)
         if categories:
@@ -4540,7 +4554,7 @@ class Kernel(QWidget):
                 legend.setFont(spaced)
                 row.text_col.addWidget(legend)
                 bar = Bar()
-                bar.setFixedHeight(14)
+                bar.setFixedHeight(16)
                 bar.setMinimumWidth(300)
                 row.right.addWidget(bar)
                 item = DriveItem(row)
