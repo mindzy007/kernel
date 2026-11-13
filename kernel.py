@@ -4720,7 +4720,7 @@ class Kernel(QWidget):
         kind = "Store app" if app["uwp"] else ("Game" if app["game"] else "App")
         loc = app["location"]
         openable = bool(loc) and os.path.isdir(loc)
-        details = [html.escape(app["publisher"])] if app["publisher"] else []
+        details = [html.escape(app["publisher"] or "Unknown publisher")]
         if loc and not openable:
             details.append(html.escape(loc))
         row = Row(app["name"], " · ".join(details))

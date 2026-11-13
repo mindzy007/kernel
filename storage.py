@@ -25,7 +25,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 $start = @{}
 Get-StartApps | ForEach-Object { $f = ($_.AppID -split '!')[0]; if ($f -and -not $start.ContainsKey($f)) { $start[$f] = $_.Name } }
 @(Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.SignatureKind -ne 'System' -and $_.InstallLocation -and $start[$_.PackageFamilyName] } | ForEach-Object {
-  [pscustomobject]@{ name = $start[$_.PackageFamilyName]; location = $_.InstallLocation }
+  [pscustomobject]@{ name = $start[$_.PackageFamilyName]; location = $_.InstallLocation; publisher = $_.Publisher }
 }) | ConvertTo-Json -Compress
 """
 
@@ -340,6 +340,24 @@ def _registry_apps():
     return out
 
 
+def _appx_publisher(location, subject):
+    """Store apps carry their publisher in two places: a friendly name in the app's manifest (sometimes only a
+    resource reference, which can't be read), and the signing certificate's subject, e.g.
+    'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond'. Use the first one that gives a real name."""
+    try:
+        with open(os.path.join(location, "AppxManifest.xml"), encoding="utf-8", errors="replace") as f:
+            m = re.search(r"<PublisherDisplayName>\s*([^<]+?)\s*</PublisherDisplayName>", f.read())
+        if m and not m.group(1).lower().startswith("ms-resource"):
+            return m.group(1)
+    except OSError:
+        pass
+    for field in ("O", "CN"):
+        m = re.search(r'(?:^|,\s*)' + field + r'=("([^"]+)"|[^,]+)', subject or "")
+        if m:
+            return (m.group(2) or m.group(1)).strip()
+    return ""
+
+
 def _appx_apps():
     try:
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", APPX_SCRIPT],
@@ -349,7 +367,8 @@ def _appx_apps():
         return []
     if isinstance(data, dict):
         data = [data]
-    return [{"name": d["name"], "publisher": "", "location": d["location"], "estimate": 0,
+    return [{"name": d["name"], "publisher": _appx_publisher(d["location"], d.get("publisher")),
+             "location": d["location"], "estimate": 0,
              "command": None, "uri": "ms-settings:appsfeatures", "uwp": True} for d in data if d.get("name")]
 
 
