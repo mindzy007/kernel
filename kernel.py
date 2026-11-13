@@ -1201,11 +1201,15 @@ class DotPie(QWidget):
                              key=lambda i: (self.pts[i][0] - ax) ** 2 + (self.pts[i][1] - ay) ** 2)
             for i in nearest[:c]:
                 owner[i] = s
-        rest = iter(i for i in range(n) if owner[i] < 0)  # angular order
-        for s, c in enumerate(counts):
-            if not small(c):
-                for _ in range(c):
-                    owner[next(rest)] = s
+        rest = [i for i in range(n) if owner[i] < 0]  # angular order
+        big = [s for s, c in enumerate(counts) if not small(c)]
+        if big:  # the big wedges begin where the first big group's slot begins: the order around the rim
+            cut = sum(1 for i in rest if i < start[big[0]])  # stays Apps, Games, Documents, System, Other, Free
+            rest = rest[cut:] + rest[:cut]
+        it = iter(rest)
+        for s in big:
+            for _ in range(counts[s]):
+                owner[next(it)] = s
         return owner
 
     def set_slices(self, slices):
