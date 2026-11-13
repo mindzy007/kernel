@@ -1177,46 +1177,43 @@ class DotPie(QWidget):
                 counts[i] = 1
         return counts
 
-    def _small_groups_outside(self):
-        """A group too small to reach the centre as a proper wedge (fewer than three spokes' worth of dots) would
-        be a lonely sliver in the middle. It is moved to the rim instead, as an arc around its own direction,
-        and the dots it swaps with fill the gap it left. Every group keeps exactly its number of dots."""
-        two_pi = 2 * math.pi
+    def _assign(self, counts):
+        """Which group owns each dot. Small groups (fewer than three spokes' worth of dots) become one compact
+        clump on the rim, in the direction their slot would have had, so they never form a thin sliver through
+        the middle. The big groups then share what is left as wedges, in order around the circle, so every
+        group stays together in one piece."""
+        n, two_pi = len(self.pts), 2 * math.pi
         ang = lambda i: math.atan2(self.pts[i][0], -self.pts[i][1]) % two_pi
         gap = lambda a, b: abs((a - b + math.pi) % two_pi - math.pi)
-        counts = {}
-        for o in self.owner:
-            counts[o] = counts.get(o, 0) + 1
-        rings = sorted({round(n, 4) for n in self.norm}, reverse=True)  # outermost first
-        taken = set()
-        for s in range(len(self.slices)):
-            if not 0 < counts.get(s, 0) <= 3 * self.RINGS:
+        small = lambda c: 0 < c <= 3 * self.RINGS
+        owner, start, acc = [-1] * n, [], 0
+        for c in counts:
+            start.append(acc)
+            acc += c
+        rim = [i for i in range(n) if self.norm[i] > 0.999]
+        for s, c in enumerate(counts):
+            if not small(c):
                 continue
-            mine = [i for i, o in enumerate(self.owner) if o == s]
-            theta = math.atan2(sum(math.sin(ang(i)) for i in mine), sum(math.cos(ang(i)) for i in mine)) % two_pi
-            want = []
-            for r in rings:  # fill the rim first, then the next ring in
-                row = sorted((i for i in range(len(self.pts)) if round(self.norm[i], 4) == r and i not in taken),
-                             key=lambda i: gap(ang(i), theta))
-                want += row[:len(mine) - len(want)]
-                if len(want) == len(mine):
-                    break
-            gone = [i for i in mine if i not in want]
-            incoming = [i for i in want if self.owner[i] != s]
-            displaced = [self.owner[i] for i in incoming]
-            for i, o in zip(gone, displaced):
-                self.owner[i] = o
-            for i in want:
-                self.owner[i] = s
-            taken.update(want)
+            theta = (start[s] + c / 2) / n * two_pi  # where this group sits around the circle
+            free_rim = [i for i in rim if owner[i] < 0] or [i for i in range(n) if owner[i] < 0]
+            ax, ay = self.pts[min(free_rim, key=lambda i: gap(ang(i), theta))]
+            nearest = sorted((i for i in range(n) if owner[i] < 0),
+                             key=lambda i: (self.pts[i][0] - ax) ** 2 + (self.pts[i][1] - ay) ** 2)
+            for i in nearest[:c]:
+                owner[i] = s
+        rest = iter(i for i in range(n) if owner[i] < 0)  # angular order
+        for s, c in enumerate(counts):
+            if not small(c):
+                for _ in range(c):
+                    owner[next(rest)] = s
+        return owner
 
     def set_slices(self, slices):
         slices = [s for s in slices if s[1] > 0]
         if slices == self.slices:
             return
         self.slices = slices
-        self.owner = [i for i, c in enumerate(self._allocate()) for _ in range(c)]
-        self._small_groups_outside()
+        self.owner = self._assign(self._allocate())
         self.pops = [0.0] * len(slices)
         self.hover = -1
         self.replay()
