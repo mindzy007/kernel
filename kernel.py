@@ -1185,8 +1185,8 @@ class DotPie(QWidget):
         return counts
 
     def _assign(self, counts):
-        """Which group owns each dot, laid out around the circle from smallest group to largest, clockwise from the
-        top. Small groups (fewer than three spokes' worth of dots) become one compact
+        """Which group owns each dot, laid out around the circle from the largest group to the smallest, clockwise
+        from the top. Small groups (fewer than three spokes' worth of dots) become one compact
         clump on the rim, in the direction their slot would have had, so they never form a thin sliver through
         the middle. The big groups then share what is left as wedges, in order around the circle, so every
         group stays together in one piece."""
@@ -1194,7 +1194,7 @@ class DotPie(QWidget):
         ang = lambda i: math.atan2(self.pts[i][0], -self.pts[i][1]) % two_pi
         gap = lambda a, b: abs((a - b + math.pi) % two_pi - math.pi)
         small = lambda c: 0 < c <= 3 * self.RINGS
-        order = sorted(range(len(counts)), key=lambda s: counts[s])  # smallest group first, largest last
+        order = sorted(range(len(counts)), key=lambda s: -counts[s])  # largest group first, smallest last
         owner, start, acc = [-1] * n, [0] * len(counts), 0
         for s in order:
             start[s] = acc
@@ -1224,7 +1224,7 @@ class DotPie(QWidget):
                 clump.append(best)
         rest = [i for i in range(n) if owner[i] < 0]  # angular order
         big = [s for s in order if not small(counts[s])]
-        it = iter(rest)  # big wedges run smallest to largest from the top; centre dots join the wedge they touch
+        it = iter(rest)  # big wedges run largest to smallest from the top; centre dots join the wedge they touch
         for s in big:
             for _ in range(counts[s]):
                 owner[next(it)] = s
