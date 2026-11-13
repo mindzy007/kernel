@@ -4127,9 +4127,15 @@ class Kernel(QWidget):
 
         def make_input():
             edit = QLineEdit()
-            edit.setFixedWidth(72)
-            edit.setMinimumHeight(40)
             edit.setAlignment(Qt.AlignCenter)
+            # same font as the value shown to its left (no font override: both use the app's text font),
+            # and the box is sized from that font so it fits a number like 1.00 or 100 snugly
+            fm = edit.fontMetrics()
+            edit.setFixedSize(fm.horizontalAdvance("0.00") + 30, fm.height() + 16)
+            edit.setStyleSheet(
+                "QLineEdit { background: #101010; border: 1px solid #262626; border-radius: 9px; "
+                "padding: 0 4px; selection-background-color: #444444; }"
+                "QLineEdit:focus { border-color: #4a4a4a; }")
             return edit
 
         def add_slider_row(title, subtitle, value_label, edit, slider):
