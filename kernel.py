@@ -1185,49 +1185,58 @@ class DotPie(QWidget):
         return counts
 
     def _assign(self, counts):
-        """Which group owns each dot, laid out around the circle from the largest group to the smallest, clockwise
-        from the top. Small groups (fewer than three spokes' worth of dots) become one compact
-        clump on the rim, in the direction their slot would have had, so they never form a thin sliver through
-        the middle. The big groups then share what is left as wedges, in order around the circle, so every
-        group stays together in one piece."""
+        """Which group owns each dot. Starting at 12 o'clock and going clockwise: the categories from the biggest
+        to the smallest, then Free (the remainder) last. Each one is a wedge from the centre. A group too small to
+        reach the centre (no more dots than there are rings) is a compact clump on the rim instead, where its place
+        in that order falls, so it never becomes a lonely sliver in the middle."""
         n, two_pi = len(self.pts), 2 * math.pi
         ang = lambda i: math.atan2(self.pts[i][0], -self.pts[i][1]) % two_pi
-        gap = lambda a, b: abs((a - b + math.pi) % two_pi - math.pi)
-        small = lambda c: 0 < c <= 3 * self.RINGS
-        order = sorted(range(len(counts)), key=lambda s: -counts[s])  # largest group first, smallest last
+        small = lambda c: 0 < c <= self.RINGS
+        free = next((i for i, sl in enumerate(self.slices) if sl[0] == "Free"), -1)
+        order = sorted((s for s in range(len(counts)) if s != free), key=lambda s: -counts[s])
+        order += [free] if free >= 0 else []
         owner, start, acc = [-1] * n, [0] * len(counts), 0
         for s in order:
             start[s] = acc
             acc += counts[s]
         rim = [i for i in range(n) if self.norm[i] > 0.999]
+        rim_r = self.RINGS * self.SPACING
+        touching = lambda i, j: (self.pts[i][0] - self.pts[j][0]) ** 2 + \
+                                (self.pts[i][1] - self.pts[j][1]) ** 2 <= (1.2 * self.SPACING) ** 2
+        edge = None  # clumps are laid along the rim clockwise, each starting where the previous one ended
         for s in order:
             c = counts[s]
             if not small(c):
                 continue
-            theta = (start[s] + c / 2) / n * two_pi  # where this group sits around the circle
+            if edge is None:
+                edge = ang(min(start[s], n - 1)) - 1e-9  # the angle of the dot where this slot really begins
             free_rim = [i for i in rim if owner[i] < 0] or [i for i in range(n) if owner[i] < 0]
-            anchor = min(free_rim, key=lambda i: gap(ang(i), theta))
-            ax, ay = self.pts[anchor]
-            rim_r = self.RINGS * self.SPACING
-            # nearest to the anchor, but leaning toward the rim so the clump is a band along the edge
-            # (a deep blob would cut the wedges next to it in two)
-            dist = lambda i: ((self.pts[i][0] - ax) ** 2 + (self.pts[i][1] - ay) ** 2
-                              + 2.0 * (rim_r - math.hypot(*self.pts[i])) ** 2)
-            touching = lambda i, j: (self.pts[i][0] - self.pts[j][0]) ** 2 + \
-                                    (self.pts[i][1] - self.pts[j][1]) ** 2 <= (1.2 * self.SPACING) ** 2
+            anchor = min([i for i in free_rim if ang(i) >= edge] or free_rim, key=ang)
+            ax, ay, aa = self.pts[anchor][0], self.pts[anchor][1], ang(anchor)
+
+            def dist(i):
+                # nearest to the anchor, leaning toward the rim so the clump is a band along the edge, and
+                # strongly toward the clockwise side so clumps keep the order
+                d = (self.pts[i][0] - ax) ** 2 + (self.pts[i][1] - ay) ** 2
+                d += 2.0 * (rim_r - math.hypot(*self.pts[i])) ** 2
+                behind = (aa - ang(i) + math.pi) % two_pi - math.pi
+                return d + (6.0 * (behind * rim_r) ** 2 if behind > 0.02 else 0.0)
+
             clump = [anchor]
             owner[anchor] = s
             while len(clump) < c:  # grow outward from the anchor one touching dot at a time: always one piece
-                edge = [i for i in range(n) if owner[i] < 0 and any(touching(i, j) for j in clump)]
-                best = min(edge or [i for i in range(n) if owner[i] < 0], key=dist)
+                near = [i for i in range(n) if owner[i] < 0 and any(touching(i, j) for j in clump)]
+                after = [i for i in near if ang(i) >= edge - 1e-9]  # never reach back into the previous group
+                best = min(after or near or [i for i in range(n) if owner[i] < 0], key=dist)
                 owner[best] = s
                 clump.append(best)
-        rest = [i for i in range(n) if owner[i] < 0]  # angular order
-        big = [s for s in order if not small(counts[s])]
-        it = iter(rest)  # big wedges run largest to smallest from the top; centre dots join the wedge they touch
-        for s in big:
-            for _ in range(counts[s]):
-                owner[next(it)] = s
+            edge = max(ang(i) for i in clump) + 0.01
+        rest = [i for i in range(n) if owner[i] < 0]  # angular order, from 12 o'clock
+        it = iter(rest)
+        for s in order:
+            if not small(counts[s]):
+                for _ in range(counts[s]):
+                    owner[next(it)] = s
         return owner
 
     def set_slices(self, slices):
