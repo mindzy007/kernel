@@ -959,6 +959,13 @@ def version_tuple(v):
 ROW_TEXT_GAP = 48
 
 
+class NoToolTips(QObject):
+    """Swallows every hover tooltip in the app, whichever widget asks for one."""
+
+    def eventFilter(self, obj, event):
+        return event.type() == QEvent.ToolTip
+
+
 class PillLabel(QWidget):
     """Small fully-rounded, antialiased badge."""
 
@@ -1178,7 +1185,8 @@ class DotPie(QWidget):
         return counts
 
     def _assign(self, counts):
-        """Which group owns each dot. Small groups (fewer than three spokes' worth of dots) become one compact
+        """Which group owns each dot, laid out around the circle from smallest group to largest, clockwise from the
+        top. Small groups (fewer than three spokes' worth of dots) become one compact
         clump on the rim, in the direction their slot would have had, so they never form a thin sliver through
         the middle. The big groups then share what is left as wedges, in order around the circle, so every
         group stays together in one piece."""
@@ -1186,27 +1194,37 @@ class DotPie(QWidget):
         ang = lambda i: math.atan2(self.pts[i][0], -self.pts[i][1]) % two_pi
         gap = lambda a, b: abs((a - b + math.pi) % two_pi - math.pi)
         small = lambda c: 0 < c <= 3 * self.RINGS
-        owner, start, acc = [-1] * n, [], 0
-        for c in counts:
-            start.append(acc)
-            acc += c
+        order = sorted(range(len(counts)), key=lambda s: counts[s])  # smallest group first, largest last
+        owner, start, acc = [-1] * n, [0] * len(counts), 0
+        for s in order:
+            start[s] = acc
+            acc += counts[s]
         rim = [i for i in range(n) if self.norm[i] > 0.999]
-        for s, c in enumerate(counts):
+        for s in order:
+            c = counts[s]
             if not small(c):
                 continue
             theta = (start[s] + c / 2) / n * two_pi  # where this group sits around the circle
             free_rim = [i for i in rim if owner[i] < 0] or [i for i in range(n) if owner[i] < 0]
-            ax, ay = self.pts[min(free_rim, key=lambda i: gap(ang(i), theta))]
-            nearest = sorted((i for i in range(n) if owner[i] < 0),
-                             key=lambda i: (self.pts[i][0] - ax) ** 2 + (self.pts[i][1] - ay) ** 2)
-            for i in nearest[:c]:
-                owner[i] = s
+            anchor = min(free_rim, key=lambda i: gap(ang(i), theta))
+            ax, ay = self.pts[anchor]
+            rim_r = self.RINGS * self.SPACING
+            # nearest to the anchor, but leaning toward the rim so the clump is a band along the edge
+            # (a deep blob would cut the wedges next to it in two)
+            dist = lambda i: ((self.pts[i][0] - ax) ** 2 + (self.pts[i][1] - ay) ** 2
+                              + 2.0 * (rim_r - math.hypot(*self.pts[i])) ** 2)
+            touching = lambda i, j: (self.pts[i][0] - self.pts[j][0]) ** 2 + \
+                                    (self.pts[i][1] - self.pts[j][1]) ** 2 <= (1.2 * self.SPACING) ** 2
+            clump = [anchor]
+            owner[anchor] = s
+            while len(clump) < c:  # grow outward from the anchor one touching dot at a time: always one piece
+                edge = [i for i in range(n) if owner[i] < 0 and any(touching(i, j) for j in clump)]
+                best = min(edge or [i for i in range(n) if owner[i] < 0], key=dist)
+                owner[best] = s
+                clump.append(best)
         rest = [i for i in range(n) if owner[i] < 0]  # angular order
-        big = [s for s, c in enumerate(counts) if not small(c)]
-        if big:  # the big wedges begin where the first big group's slot begins: the order around the rim
-            cut = sum(1 for i in rest if i < start[big[0]])  # stays Apps, Games, Documents, System, Other, Free
-            rest = rest[cut:] + rest[:cut]
-        it = iter(rest)
+        big = [s for s in order if not small(counts[s])]
+        it = iter(rest)  # big wedges run smallest to largest from the top; centre dots join the wedge they touch
         for s in big:
             for _ in range(counts[s]):
                 owner[next(it)] = s
@@ -1869,7 +1887,6 @@ class ElidedLabel(QLabel):
 
     def setText(self, text):
         super().setText(text)
-        self.setToolTip(text)
 
     def minimumSizeHint(self):
         return QSize(0, super().minimumSizeHint().height())
@@ -1990,7 +2007,6 @@ class ColorSwatches(QWidget):
         if i != self.hover:
             self.hover = i
             self.setCursor(Qt.PointingHandCursor if i >= 0 else Qt.ArrowCursor)
-            self.setToolTip(self.names[i] if i >= 0 else "")
             self.tick.start()
 
     def leaveEvent(self, e):
@@ -2331,7 +2347,6 @@ class ClearButton(QAbstractButton):
         self.setFixedSize(self.SIZE, self.SIZE)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
-        self.setToolTip("Clear")
         self._hover = 0.0
         self.anim = QPropertyAnimation(self, b"hover", self)
         self.anim.setEasingCurve(QEasingCurve.InOutSine)
@@ -5834,6 +5849,8 @@ if __name__ == "__main__":
     base_font.setHintingPreference(QFont.PreferNoHinting)
     app.setFont(base_font)
     app.setStyleSheet(QSS)
+    no_tips = NoToolTips(app)
+    app.installEventFilter(no_tips)
     w = Kernel()
     w.prewarm_layout()
     w.show()
