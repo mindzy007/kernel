@@ -46,8 +46,8 @@ BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
 ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
            ("Green", "#4fd08a"), ("Amber", "#ffb454"), ("Red", "#ff6b6b"))
-CATEGORY_COLORS = {"Apps": "#0a84ff", "Games": "#30d158", "Documents & files": "#bf5af2",
-                   "System": "#8e8e93", "Other": "#ff9f0a"}
+CATEGORY_COLORS = {"Apps": "#bf5af2", "Games": "#30d158", "Documents & files": "#0a84ff",
+                   "System": "#454549", "Other": "#8e8e93"}
 FREE_COLOR = "#c8c8cd"  # free space: a soft off-white
 
 QSS = f"""
@@ -4732,8 +4732,8 @@ class Kernel(QWidget):
             link.clicked.connect(lambda path=loc: os.startfile(path))
             row.text_col.addWidget(link, 0, Qt.AlignLeft)
         accent, text = {"Game": ((48, 209, 88), (90, 225, 125)),
-                        "App": ((10, 132, 255), (90, 170, 255)),
-                        "Store app": ((191, 90, 242), (214, 140, 255))}[kind]
+                        "App": ((191, 90, 242), (214, 140, 255)),
+                        "Store app": ((255, 159, 10), (255, 190, 80))}[kind]
         row.title_row.insertWidget(1, PillLabel(kind, accent, text))
         bar = Bar()
         bar.setFixedHeight(8)
