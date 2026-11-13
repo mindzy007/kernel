@@ -197,7 +197,7 @@ def _reg_value(key, name):
 
 
 # Publishers whose name gives a game away (matched as plain text inside the publisher field).
-GAME_PUBLISHERS = ("games", "gaming", "interactive", "entertainment", "studios", "valve", "electronic arts",
+GAME_PUBLISHERS = ("psyonix", "games", "gaming", "interactive", "entertainment", "studios", "valve", "electronic arts",
                    "activision", "blizzard", "ubisoft", "rockstar", "bethesda", "cd projekt", "bandai", "square enix",
                    "capcom", "sega", "konami", "take-two", "bungie", "mojang", "wargaming", "gaijin", "nexon",
                    "hoyoverse", "mihoyo", "supercell")
@@ -236,6 +236,68 @@ def _install_root(folder, name):
         cur = parent
         if len(_words(os.path.basename(cur)) & words) / len(words) >= 0.6:
             best = cur
+
+
+def _json_file(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _subkey_values(hive, path, names):
+    """First non-empty value (from `names`) of every subkey under hive\\path."""
+    out = []
+    try:
+        with winreg.OpenKey(hive, path) as base:
+            for i in range(winreg.QueryInfoKey(base)[0]):
+                try:
+                    with winreg.OpenKey(base, winreg.EnumKey(base, i)) as key:
+                        for n in names:
+                            v = _reg_value(key, n)
+                            if v:
+                                out.append(str(v))
+                                break
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def launcher_game_dirs():
+    """Install folders that the game launchers themselves list as games (normalised). A game can live in any
+    folder, so this is far more reliable than guessing from the path or the publisher's name."""
+    dirs = set()
+    epic = os.path.join(os.environ.get("ProgramData", "C:\\ProgramData"), "Epic")
+    manifests = os.path.join(epic, "EpicGamesLauncher", "Data", "Manifests")
+    try:
+        for fn in os.listdir(manifests):
+            data = _json_file(os.path.join(manifests, fn)) if fn.endswith(".item") else None
+            if isinstance(data, dict) and data.get("InstallLocation"):
+                cats = [str(c).lower() for c in data.get("AppCategories") or []]
+                if not cats or "games" in cats:
+                    dirs.add(_norm(data["InstallLocation"]))
+    except OSError:
+        pass
+    data = _json_file(os.path.join(epic, "UnrealEngineLauncher", "LauncherInstalled.dat"))
+    if isinstance(data, dict):
+        for item in data.get("InstallationList") or []:
+            if isinstance(item, dict) and item.get("InstallLocation") and not str(item.get("AppName", "")).startswith("UE_"):
+                dirs.add(_norm(item["InstallLocation"]))
+    hklm = winreg.HKEY_LOCAL_MACHINE
+    for path, names in ((r"SOFTWARE\WOW6432Node\GOG.com\Games", ("path",)),
+                        (r"SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs", ("InstallDir",)),
+                        (r"SOFTWARE\WOW6432Node\EA Games", ("Install Dir",)),
+                        (r"SOFTWARE\WOW6432Node\Rockstar Games", ("InstallFolder",))):
+        dirs.update(_norm(v) for v in _subkey_values(hklm, path, names))
+    return dirs
+
+
+def _in_dirs(location, dirs):
+    n = _norm(location) if location else None
+    return bool(n) and any(n == d or n.startswith(d + "\\") for d in dirs)
 
 
 def _registry_apps():
@@ -336,6 +398,7 @@ def installed_apps():
     items = _registry_apps() + _steam_apps() + _appx_apps()
     with ThreadPoolExecutor(4, initializer=lower_priority) as pool:
         sizes = list(pool.map(lambda it: size_of(it["location"]) if it["location"] else it["estimate"], items))
+    launch = launcher_game_dirs()
     kept, seen = [], set()
     for it, size in sorted(zip(items, sizes), key=lambda p: p[1], reverse=True):
         key = _norm(it["location"]) if it["location"] else None
@@ -343,7 +406,7 @@ def installed_apps():
             continue
         seen.add(key)
         it["size"] = size
-        it["game"] = _is_game(it["name"], it["location"], it["publisher"]) or "\\xboxgames\\" in f"{it['location']}\\".lower()
+        it["game"] = _in_dirs(it["location"], launch) or _is_game(it["name"], it["location"], it["publisher"]) or "\\xboxgames\\" in f"{it['location']}\\".lower()
         kept.append(it)
     # Drop apps that merely contain other listed apps (a launcher holding its games, for example).
     inside = {_norm(it["location"]) + "\\": it["size"] for it in kept if it["location"]}
