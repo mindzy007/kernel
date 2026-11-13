@@ -4537,7 +4537,7 @@ class Kernel(QWidget):
         self.drive_box.setSpacing(2)
         page.col.addLayout(self.drive_box)
 
-        page.section("Biggest apps and games")
+        page.section("Apps & games")
         self.apps_box = QVBoxLayout()
         self.apps_box.setSpacing(2)
         page.col.addLayout(self.apps_box)
