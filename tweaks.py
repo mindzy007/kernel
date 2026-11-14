@@ -637,7 +637,7 @@ ACTIVE_CHECKS = {
         HKCU, r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings",
         "TaskbarEndTask") == 1,
     "t_sounds": lambda: _reg(HKCU, r"AppEvents\Schemes", "") == ".None",
-    "t_mactype": lambda: bool(_reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "MacType")),
+    "t_mactype": lambda: _mactype_active(),
     "t_cursor": lambda: _reg(HKCU, r"Control Panel\Cursors", "") == "Big Sur",
     "t_notepad": lambda: _active_notepad(),
     "t_nvidia_profile": lambda: os.path.isfile(NVIDIA_MARKER),
@@ -794,23 +794,63 @@ def revert_tweak(fn, log):
     log(f"{fn.__name__} reverted to its Windows default.")
 
 
-MACTYPE_PROFILE = "XMac.LCD.HotShift@XHei(iOS^MacOS)"
+def _crt_profile(ini_dir):
+    """Path (relative to MacType's folder is added by the caller) of the CRT default profile: a profile file
+    whose name has both 'crt' and 'default' is preferred, then one that is just CRT, then any with 'crt'."""
+    best = None
+    for root, _, files in os.walk(ini_dir):
+        for fn in files:
+            low = fn.lower()
+            if not low.endswith(".ini") or "crt" not in low:
+                continue
+            rank = (0 if "default" in low else 1 if low == "crt.ini" else 2, len(fn))
+            if best is None or rank < best[0]:
+                best = (rank, os.path.join(root, fn))
+    return best[1] if best else None
+
+
+def _mactype_base():
+    return next((d for d in (os.path.expandvars(r"%ProgramFiles%\MacType"),
+                             os.path.expandvars(r"%ProgramFiles(x86)%\MacType"))
+                 if os.path.isfile(os.path.join(d, "MacTray.exe"))), None)
+
+
+def _mactype_active():
+    """Applied only when MacType starts with Windows AND its current profile is the CRT one. (Checking just the
+    startup entry also said 'applied' when an older profile was still selected.)"""
+    if not _reg(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "MacType"):
+        return False
+    base = _mactype_base()
+    wanted = _crt_profile(os.path.join(base, "ini")) if base else None
+    if not wanted:
+        return False
+    try:
+        with open(os.path.join(base, "MacType.ini"), "rb") as f:
+            raw = f.read()
+        enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+        sect = ""
+        for ln in raw.decode(enc, errors="replace").splitlines():
+            line = ln.strip()
+            if line.startswith("["):
+                sect = line.lower()
+            elif sect == "[general]" and line.lower().startswith("alternativefile="):
+                current = line.split("=", 1)[1].strip()
+                norm = lambda p: os.path.normcase(os.path.normpath(p))
+                return norm(current) == norm(os.path.relpath(wanted, base))
+    except OSError:
+        pass
+    return False
 
 
 def t_mactype(log):
-    base = next((d for d in (os.path.expandvars(r"%ProgramFiles%\MacType"),
-                             os.path.expandvars(r"%ProgramFiles(x86)%\MacType"))
-                 if os.path.isfile(os.path.join(d, "MacTray.exe"))), None)
+    base = _mactype_base()
     if not base:
         raise RuntimeError("MacType is not installed. Install it from the Applications tab first.")
     ini_dir = os.path.join(base, "ini")
-    prof = None
-    for root, _, files in os.walk(ini_dir):
-        if MACTYPE_PROFILE + ".ini" in files:
-            prof = os.path.relpath(os.path.join(root, MACTYPE_PROFILE + ".ini"), base)
-            break
-    if not prof:
-        raise RuntimeError(f"MacType profile '{MACTYPE_PROFILE}' was not found in {ini_dir}.")
+    found = _crt_profile(ini_dir)
+    if not found:
+        raise RuntimeError(f"No CRT profile was found in {ini_dir}.")
+    prof = os.path.relpath(found, base)
     path = os.path.join(base, "MacType.ini")
     with open(path, "rb") as f:
         raw = f.read()
@@ -833,7 +873,7 @@ def t_mactype(log):
     set_str(HKCU, r"Software\Microsoft\Windows\CurrentVersion\Run", "MacType", f'"{os.path.join(base, "MacTray.exe")}"')
     run(["taskkill", "/f", "/im", "MacTray.exe"])
     subprocess.Popen([os.path.join(base, "MacTray.exe")], cwd=base, creationflags=NOWIN)
-    log(f"MacType profile set to {MACTYPE_PROFILE}; tray app started and added to startup.")
+    log(f"MacType profile set to {os.path.splitext(os.path.basename(prof))[0]}; tray app started and added to startup.")
 
 
 WINRT_INT32, WINRT_STRING = 100000004, 100000012  # registry types used by packaged-app settings.dat
@@ -1130,7 +1170,7 @@ TASKS = [
     ("Appearance", "Taskbar date format", "Show the date as MMM d, yyyy (e.g. Dec 31, 2030)", t_time_format),
     ("Appearance", "Enable End Task in taskbar", "Adds 'End task' to the right-click menu of taskbar apps", t_end_task),
     ("Appearance", "Disable Windows sounds", "Sound scheme to 'No Sounds' and no startup chime", t_sounds),
-    ("Appearance", "Apply MacType in system tray", "Use the XMac LCD HotShift profile (MacType must be installed)", t_mactype),
+    ("Appearance", "Apply MacType in system tray", "Use the CRT default profile (MacType must be installed)", t_mactype),
     ("Appearance", "Apply Big Sur cursor", "Install the Big Sur cursor pack and apply it as your cursor scheme", t_cursor),
     ("NVIDIA", "Apply NVIDIA Profile", "Applies a minimal and optimized NVIDIA Profile Inspector config.", t_nvidia_profile),
     ("Appearance", "Notepad settings", "Set Notepad's font to Consolas Regular 14", t_notepad),
