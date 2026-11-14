@@ -1125,8 +1125,8 @@ class DotPie(QWidget):
         self.norm = [math.hypot(x, y) / (self.RINGS * self.SPACING) for x, y in pts]  # 0 centre .. 1 outer ring
         self.pts = pts
         self.sweep_anim = QVariantAnimation(self)
-        self.sweep_anim.setDuration(900)
-        self.sweep_anim.setEasingCurve(QEasingCurve.InOutSine)
+        self.sweep_anim.setDuration(1300)
+        self.sweep_anim.setEasingCurve(bezier_curve(0.22, 0.61, 0.36, 1.0))  # smooth ease-out, no hard start or stop
         self.sweep_anim.valueChanged.connect(self._set_sweep)
         self._pending = -1
         self.settle = QTimer(self)  # the pointer must rest on a group a moment before the highlight moves
@@ -1260,15 +1260,16 @@ class DotPie(QWidget):
         colors = [QColor(sl[2]) for sl in self.slices]
         shine = QColor(255, 255, 255, 46)
         for idx, (x, y) in enumerate(self.pts):
-            appear = min(1.0, max(0.0, (self._sweep * 1.7 - self.norm[idx]) / 0.7))  # centre first, edge last
+            # centre first, edge last, with a wide overlap so the dots flow outward like a ripple
+            appear = min(1.0, max(0.0, (self._sweep * 1.9 - self.norm[idx]) / 0.9))
             if appear <= 0:
                 continue
+            e = appear * appear * (3 - 2 * appear)  # each dot eases in on its own (smoothstep)
             g = self.owner[idx]
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
-            grow = 1 + 1.6 * (appear - 1) ** 3 + 0.6 * (appear - 1) ** 2  # settles with a tiny overshoot
-            r = self.DOT * grow * (1 + 0.06 * pop)
-            p.setOpacity(min(1.0, appear * 2.0) * (1.0 - 0.3 * dim * (1 - pop)))
+            r = self.DOT * (0.3 + 0.7 * e) * (1 + 0.06 * pop)  # starts at 30% size: nothing pops out of thin air
+            p.setOpacity(e * (1.0 - 0.3 * dim * (1 - pop)))
             p.setBrush(colors[g])
             p.drawEllipse(QPointF(cx + x, cy + y), r, r)
             p.setBrush(shine)  # a soft highlight gives each dot a little volume
