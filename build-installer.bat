@@ -18,6 +18,12 @@ python -m PyInstaller --noconfirm --clean --onedir --windowed --uac-admin ^
   --add-data "monitor-helper\out\kernel-monitor.exe;monitor-helper" ^
   kernel.py || goto :fail
 
+if exist redist\PawnIO_setup.exe (
+  echo PawnIO driver installer found: it will be included as an optional install step.
+) else (
+  echo NOTE: redist\PawnIO_setup.exe not found, so the installer is built WITHOUT the PawnIO option.
+  echo       To include it, save the official installer from https://pawnio.eu as redist\PawnIO_setup.exe
+)
 echo [4/4] Building installer (needs Inno Setup)...
 set ISCC=
 if not defined ISCC if exist "%ProgramFiles%\Inno Setup 7\ISCC.exe" set ISCC="%ProgramFiles%\Inno Setup 7\ISCC.exe"

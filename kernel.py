@@ -1762,8 +1762,11 @@ class MetricCard(QFrame):
     def set_alert(self, alert):
         self.value.setStyleSheet("color: #ff6268;" if alert else "")
 
+    HOT_C = 80  # at or above this the reading turns red; below it the text stays white
+
     def set_temperature(self, temperature):
-        self.value.setStyleSheet("color: #ff6268;" if temperature is not None and temperature >= 80 else "")
+        hot = temperature is not None and temperature >= self.HOT_C
+        self.value.setStyleSheet("color: #ff6268;" if hot else "")
 
 
 class TaskRow(Row):
@@ -5332,9 +5335,6 @@ class Kernel(QWidget):
         if temperature is None:
             card.set_value("Unavailable")
             card.set_temperature(None)
-        elif temperature >= 80:
-            card.set_value(f"{temperature:.0f} °C · HOT")
-            card.set_temperature(temperature)
         else:
             card.set_value(f"{temperature:.0f} °C")
             card.set_temperature(temperature)
