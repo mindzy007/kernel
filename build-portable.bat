@@ -9,10 +9,12 @@ if not exist monitor-helper\out\kernel-monitor.exe (
   dotnet publish monitor-helper -c Release -o monitor-helper\out || goto :fail
 )
 
+if exist __pycache__ rmdir /s /q __pycache__
 for /f %%v in ('python -c "from version import VERSION; print(VERSION)"') do set VER=%%v
+echo Version from version.py: %VER%
 python make_version_info.py || goto :fail
 echo Building Kernel-Portable-%VER%.exe...
-python -m PyInstaller --noconfirm --onefile --windowed --uac-admin ^
+python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin ^
   --name Kernel-Portable-%VER% --icon "%CD%\icon.ico" --version-file "%CD%\version_info.txt" ^
   --distpath installer --workpath build\portable --specpath build\portable ^
   --add-data "%CD%\icon.ico;." --add-data "%CD%\icon.png;." ^

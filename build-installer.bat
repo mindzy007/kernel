@@ -8,7 +8,9 @@ python -m pip install -q --upgrade pyinstaller PySide6-Essentials || goto :fail
 echo [2/4] Building monitor helper (needs .NET 8 SDK)...
 dotnet publish monitor-helper -c Release -o monitor-helper\out || goto :fail
 
+if exist __pycache__ rmdir /s /q __pycache__
 for /f %%v in ('python -c "from version import VERSION; print(VERSION)"') do set VER=%%v
+echo Version from version.py: %VER%
 python make_version_info.py || goto :fail
 echo [3/4] Building Kernel.exe %VER%...
 python -m PyInstaller --noconfirm --clean --onedir --windowed --uac-admin ^
