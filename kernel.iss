@@ -53,10 +53,10 @@ Filename: "{tmp}\PawnIO_setup.exe"; Parameters: "-install -silent"; StatusMsg: "
 Filename: "{app}\Kernel.exe"; Description: "Launch Kernel"; Flags: shellexec nowait postinstall skipifsilent
 
 [Code]
-{ True when PawnIO is already on this PC (its own uninstall entry, or its driver service). Other programs use it
-  too, so it is skipped when present and is never removed when Kernel is uninstalled. }
+{ True when PawnIO is properly installed on this PC: its own uninstall entry exists. Its driver service key can
+  linger after an uninstall, so it is not used. Other programs use PawnIO too, so it is skipped when present and
+  is never removed when Kernel is uninstalled. }
 function PawnIOInstalled: Boolean;
 begin
-  Result := RegKeyExists(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO')
-         or RegKeyExists(HKLM, 'SYSTEM\CurrentControlSet\Services\PawnIO');
+  Result := RegKeyExists(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO');
 end;

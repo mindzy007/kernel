@@ -5324,8 +5324,10 @@ class Kernel(QWidget):
     def pawnio_installed():
         try:
             import winreg
+            # PawnIO's own uninstall entry (its driver service key can linger after an uninstall)
             winreg.CloseKey(winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Services\PawnIO"))
+                winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO",
+                0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY))
             return True
         except OSError:
             return False
