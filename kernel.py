@@ -813,7 +813,7 @@ class WINDOWPOS(ctypes.Structure):
 class HoverFrame(QFrame):
     """Row background that fades in on hover. Only one frame is lit at a time, and a watcher clears the
     highlight if the pointer left without the leave event arriving (the downloads panel does that)."""
-    HOVER_LEVEL = 15  # brightness (0-255) of the hovered background
+    HOVER_LEVEL = 8  # brightness (0-255) of the hovered background
     active = None
     watch = None
 
@@ -1938,7 +1938,7 @@ class ElidedLabel(QLabel):
 
 
 class JobRow(HoverFrame):
-    HOVER_LEVEL = 18  # alpha of the white hover wash; a bit lighter than other rows
+    HOVER_LEVEL = 11  # alpha of the white hover wash; a bit lighter than other rows
 
     def __init__(self, job, kernel):
         super().__init__()
@@ -4721,6 +4721,10 @@ class Kernel(QWidget):
         self.drive_box.setSpacing(2)
         page.col.addLayout(self.drive_box)
 
+        page.section("Clean up")
+        for cat, name, desc, fn in TASKS:
+            if cat == "Storage":
+                page.add(self.run_row(name, fn))
         page.col.addSpacing(26)
         apps_header = QHBoxLayout()
         apps_header.setContentsMargins(0, 0, 16, 0)
@@ -4746,10 +4750,6 @@ class Kernel(QWidget):
         self.apps_box.setSpacing(2)
         page.col.addLayout(self.apps_box)
 
-        page.section("Clean up")
-        for cat, name, desc, fn in TASKS:
-            if cat == "Storage":
-                page.add(self.run_row(name, fn))
         page.col.addStretch()
         self.storage_apps = {}
         self.storage_scanned = False
