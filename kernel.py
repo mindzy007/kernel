@@ -2887,7 +2887,8 @@ class SegmentedFilter(QWidget):
         f.setHintingPreference(QFont.PreferNoHinting)
         self.setFont(f)
         fm = QFontMetrics(f)
-        self.seg_w = max(fm.horizontalAdvance(t) for t, _ in options) + 36
+        # two buttons of ROW_ACTION_BUTTON_WIDTH plus the 8px gap between them: 2 * seg_w + 2 * PAD = 200
+        self.seg_w = max(max(fm.horizontalAdvance(t) for t, _ in options) + 36, ROW_ACTION_BUTTON_WIDTH)
         self.setFixedSize(self.seg_w * len(options) + self.PAD * 2, height)
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
