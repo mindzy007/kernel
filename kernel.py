@@ -40,7 +40,7 @@ from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
-TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 56, 4, 56
+TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 18, 4, 56
 TINT = 165  # darkness (0-255) of the title bar blur
 BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
@@ -2234,7 +2234,7 @@ class Page(QScrollArea):
         col = QWidget()
         outer.addWidget(col, 1)
         self.col = QVBoxLayout(col)
-        self.col.setContentsMargins(0, 48 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 36)
+        self.col.setContentsMargins(0, 34 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 36)
         self.col.setSpacing(0)
         t = QLabel(title)
         t.setObjectName("title")
@@ -3844,7 +3844,7 @@ class Kernel(QWidget):
             sl.addSpacing(logo.sizeHint().height())
         else:
             sl.addWidget(logo)
-        sl.addSpacing(20)
+        sl.addSpacing(6)
         outer.addWidget(side)
 
         right = QWidget()
@@ -4019,9 +4019,9 @@ class Kernel(QWidget):
         pw = min(520, w - 48)
         ph = min(600, h - 137)
         shift = TITLEBAR_H - 16 if hasattr(self, "titlebar") else 0
-        self.overlay.panel.setGeometry(w - 36 - pw, 103 + shift, pw, ph)
+        self.overlay.panel.setGeometry(w - 36 - pw, 89 + shift, pw, ph)
         self.pill.adjustSize()
-        self.pill.move(w - 36 - self.pill.width(), 47 + shift)
+        self.pill.move(w - 36 - self.pill.width(), 33 + shift)
         if hasattr(self, "titlebar"):
             self.titlebar.setGeometry(0, 0, w, TITLEBAR_H)
             self.softedge.setGeometry(0, 0, w, TITLEBAR_H + TITLEBAR_SOFT)
@@ -5041,7 +5041,7 @@ class Kernel(QWidget):
 
     def build_apps(self):
         page = Page("Applications")
-        page.col.setContentsMargins(0, 48 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 120)
+        page.col.setContentsMargins(0, 34 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 120)
         page.col.addSpacing(16)
         self.search_box = QLineEdit()
         self.search_box.setObjectName("search")
@@ -5195,7 +5195,7 @@ class Kernel(QWidget):
     def build_activity(self):
         page = QWidget()
         pl = QVBoxLayout(page)
-        pl.setContentsMargins(20, 48 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 20, 28)
+        pl.setContentsMargins(20, 34 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 20, 28)
         t = QLabel("Activity")
         t.setObjectName("title")
         pl.addWidget(t)
