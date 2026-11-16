@@ -461,7 +461,7 @@ class Button(AnimButton):
                 self.spotlight(p, inner, 95, BUTTON_GLOW)
             edge = QPainterPath()
             edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), k["r"], k["r"])
-            p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+            p.setPen(QPen(QColor(255, 255, 255, 14), 1))
             p.drawPath(edge)
         p.restore()
         p.setPen(QColor(*text))
@@ -2734,7 +2734,7 @@ class PopupBackdrop(QWidget):
                          QRectF(origin.x() * k, origin.y() * k, self.width() * k, self.height() * k))
             p.fillPath(path, QColor(14, 14, 14, 115))
         p.setClipping(False)
-        p.setPen(QPen(QColor(255, 255, 255, 34), 1))
+        p.setPen(QPen(QColor(255, 255, 255, 14), 1))
         p.drawPath(path)
 
 
@@ -2885,14 +2885,14 @@ class SegmentedFilter(QWidget):
         self.setCursor(Qt.PointingHandCursor)
         self.setMouseTracking(True)
         self.anim = QVariantAnimation(self)
-        self.anim.setDuration(320)
-        self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.anim.setDuration(380)
+        self.anim.setEasingCurve(bezier_curve(0.32, 0.72, 0.0, 1.0))
         self.anim.valueChanged.connect(self._set_pos)
         self.hover_anims = []
         for i in range(len(options)):
             a = QVariantAnimation(self)
-            a.setDuration(180)
-            a.setEasingCurve(QEasingCurve.OutCubic)
+            a.setDuration(260)
+            a.setEasingCurve(bezier_curve(0.4, 0.0, 0.2, 1.0))
             a.valueChanged.connect(lambda v, i=i: self._set_hov(i, v))
             self.hover_anims.append(a)
 
@@ -2955,7 +2955,7 @@ class SegmentedFilter(QWidget):
         p.fillPath(track, QColor(11, 11, 11))
         edge = QPainterPath()
         edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.setPen(QPen(QColor(255, 255, 255, 14), 1))
         p.drawPath(edge)
         inset = self.PAD
         thumb = QRectF(inset + self._pos * self.seg_w, inset, self.seg_w, self.height() - inset * 2)
@@ -2963,7 +2963,7 @@ class SegmentedFilter(QWidget):
         thumb_path = QPainterPath()
         thumb_path.addRoundedRect(thumb, rad, rad)
         p.fillPath(thumb_path, QColor(255, 255, 255, 24))
-        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        p.setPen(QPen(QColor(255, 255, 255, 20), 1))
         thumb_edge = QPainterPath()
         thumb_edge.addRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
         p.drawPath(thumb_edge)
@@ -2977,7 +2977,7 @@ class SegmentedFilter(QWidget):
 
 
 class FluentCombo(QComboBox):
-    FADE_IN_MS, FADE_OUT_MS = 320, 220
+    FADE_IN_MS, FADE_OUT_MS = 420, 260
     ZOOM_FROM = 0.965
 
     def __init__(self):
@@ -2994,7 +2994,7 @@ class FluentCombo(QComboBox):
         self.a_cursor = QPropertyAnimation(self, b"cursorPosition", self)
         self._caret = 0.0  # 0 = arrow down (closed), 1 = flipped 180 degrees (open)
         self.a_caret = QVariantAnimation(self)
-        self.a_caret.setEasingCurve(QEasingCurve.InOutCubic)
+        self.a_caret.setEasingCurve(bezier_curve(0.4, 0.0, 0.2, 1.0))
         self.a_caret.valueChanged.connect(self._set_caret)
         self._text_alpha = 1.0  # the shown choice fades in when the user picks a new one
         self.a_text = QVariantAnimation(self)
@@ -3111,7 +3111,9 @@ class FluentCombo(QComboBox):
     def fade_popup(self, target, ms):
         self._fade.stop()
         self._fade.setDuration(ms)
-        self._fade.setEasingCurve(QEasingCurve.OutCubic)
+        # long soft landing when opening, gentle ease-in-out when closing
+        self._fade.setEasingCurve(bezier_curve(0.16, 1.0, 0.3, 1.0) if target > self._progress
+                                  else bezier_curve(0.4, 0.0, 0.2, 1.0))
         self._fade.setStartValue(self._progress)
         self._fade.setEndValue(target)
         self._fade.start()
@@ -3161,7 +3163,7 @@ class FluentCombo(QComboBox):
         draw_spotlight(p, inner, self.rect(), self._cursor_pos, self._hover, 70, DROPDOWN_GLOW)
         edge = QPainterPath()
         edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 11, 11)
-        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.setPen(QPen(QColor(255, 255, 255, 14), 1))
         p.drawPath(edge)
         p.end()
         h = self._hover
