@@ -1267,11 +1267,11 @@ class DotPie(QWidget):
             g = self.owner[idx]
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
-            r = self.DOT * (0.3 + 0.7 * e) * (1 + 0.15 * pop)  # starts at 30% size: nothing pops out of thin air
+            r = self.DOT * (0.3 + 0.7 * e) * (1 + 0.08 * pop)  # starts at 30% size: nothing pops out of thin air
             p.setOpacity(e)
             k = dim * (1 - pop)  # 0 for the hovered group, up to 1 for the others
             c = colors[g].toHsv()
-            c.setHsv(c.hue(), int(c.saturation() * (1 - 0.8 * k)), int(c.value() * (1 - 0.6 * k)))
+            c.setHsv(c.hue(), int(c.saturation() * (1 - 0.5 * k)), int(c.value() * (1 - 0.35 * k * c.value() / 255)))
             p.setBrush(c)
             p.drawEllipse(QPointF(cx + x, cy + y), r, r)
 
