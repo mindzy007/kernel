@@ -4574,7 +4574,29 @@ class Kernel(QWidget):
         self.drive_box.setSpacing(2)
         page.col.addLayout(self.drive_box)
 
-        page.section("Apps & games")
+        page.col.addSpacing(26)
+        apps_header = QHBoxLayout()
+        apps_header.setContentsMargins(0, 0, 16, 0)
+        apps_label = QLabel("Apps & games")
+        apps_label.setObjectName("section")
+        apps_header.addWidget(apps_label)
+        apps_header.addStretch()
+        self.apps_drive = ""  # "" = every drive, else a root like "D:\\"
+        self.drive_filter = FluentCombo()
+        self.drive_filter.setFixedWidth(150)
+        self.drive_filter.addItem("All drives", "")
+        self.drive_filter.setVisible(False)  # only shown when there is more than one drive
+        self.drive_filter.activated.connect(self.on_apps_filter)
+        self.sort_filter = FluentCombo()
+        self.sort_filter.setFixedWidth(150)
+        self.sort_filter.addItem("Biggest first", True)
+        self.sort_filter.addItem("Smallest first", False)
+        self.sort_filter.activated.connect(self.on_apps_filter)
+        apps_header.addWidget(self.drive_filter)
+        apps_header.addSpacing(8)
+        apps_header.addWidget(self.sort_filter)
+        page.col.addLayout(apps_header)
+        page.col.addSpacing(8)
         self.apps_box = QVBoxLayout()
         self.apps_box.setSpacing(2)
         page.col.addLayout(self.apps_box)
@@ -4616,6 +4638,7 @@ class Kernel(QWidget):
                     w.deleteLater()
             self.drive_rows = {}
             self.storage_apps = {}
+            self.update_drive_filter(roots)
             for root, label, free, total in items:
                 row = DriveRow(f"{label} ({root[:2]})", "")
                 row.text_col.setSpacing(7)  # more air between the name, usage line and legend
@@ -4791,6 +4814,24 @@ class Kernel(QWidget):
         row.right.addWidget(u)
         return row
 
+    def update_drive_filter(self, roots):
+        """Keep the drive filter in step with the drives that exist, remembering the current pick."""
+        self.drive_filter.blockSignals(True)
+        self.drive_filter.clear()
+        self.drive_filter.addItem("All drives", "")
+        for root in roots:
+            self.drive_filter.addItem(f"Drive {root[:2]}", root)
+        idx = self.drive_filter.findData(self.apps_drive)
+        if idx < 0:
+            idx, self.apps_drive = 0, ""
+        self.drive_filter.setCurrentIndex(idx)
+        self.drive_filter.blockSignals(False)
+        self.drive_filter.setVisible(len(roots) > 1)
+
+    def on_apps_filter(self, _=None):
+        self.apps_drive = self.drive_filter.currentData() or ""
+        self.render_apps()
+
     def render_apps(self):
         if self.apps_anim is not None:
             self.apps_anim.stop()
@@ -4800,8 +4841,10 @@ class Kernel(QWidget):
             item = self.apps_box.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        everything = sorted((a for items in self.storage_apps.values() for a in items),
-                            key=lambda a: a["size"], reverse=True)
+        biggest_first = self.sort_filter.currentData() is not False
+        everything = sorted((a for root, items in self.storage_apps.items()
+                             if not self.apps_drive or root == self.apps_drive for a in items),
+                            key=lambda a: a["size"], reverse=biggest_first)
         if not everything:
             hint = QLabel("Scanning your drives..." if any(
                 self.drive_rows[r]["bar"].scanning for r in self.drive_rows)
@@ -4810,7 +4853,7 @@ class Kernel(QWidget):
             hint.setContentsMargins(16, 0, 16, 0)
             self.apps_box.addWidget(hint)
             return
-        top = everything[0]["size"] or 1
+        top = max(a["size"] for a in everything) or 1
         for app in everything[:8]:
             self.apps_box.addWidget(self.app_row(app, top))
         if len(everything) > 8:
