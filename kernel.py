@@ -1453,6 +1453,7 @@ class DrivePanel(QWidget):
         self.right.setSpacing(16)
         lay.addLayout(self.right, 1)
         self.default_caption, self.total = "", 0
+        self.lines = []  # (widget, opacity effect) of each breakdown line, in slice order
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -1461,7 +1462,17 @@ class DrivePanel(QWidget):
         p.setBrush(QColor(255, 255, 255, 9))
         p.drawRoundedRect(QRectF(self.rect()), 14, 14)
 
+    def _dim_lines(self, idx):
+        """Fade every breakdown line except the hovered one (all full again when nothing is hovered)."""
+        for i, (w, fx) in enumerate(self.lines):
+            anim = QPropertyAnimation(fx, b"opacity", w)
+            anim.setDuration(140)
+            anim.setEndValue(0.35 if idx >= 0 and i != idx else 1.0)
+            w._anim = anim  # keep a reference so it is not garbage collected
+            anim.start()
+
     def _hover(self, idx):
+        self._dim_lines(idx)
         if idx < 0:
             self.detail.set_text(self.HINT, MUTED)
             return
@@ -1551,6 +1562,7 @@ class DrivePanel(QWidget):
             slices = [("Used", used, "#cfcfcf")]
         self.pie.set_slices(slices + [("Free", free, FREE_COLOR)])
         _clear_layout(self.right)
+        self.lines = []
         pct = round(used / total * 100) if total else 0
         stats = QHBoxLayout()
         stats.setSpacing(34)
@@ -1567,7 +1579,12 @@ class DrivePanel(QWidget):
             col = QVBoxLayout()
             col.setSpacing(9)
             for name, size, color in self.pie.slices:
-                col.addWidget(self._line(color, name, apps.human(size), self._pct(size)))
+                line = self._line(color, name, apps.human(size), self._pct(size))
+                fx = QGraphicsOpacityEffect(line)
+                fx.setOpacity(1.0)
+                line.setGraphicsEffect(fx)
+                self.lines.append((line, fx))
+                col.addWidget(line)
             self.right.addLayout(col)
         folders = [f for f in folders if f[1] > 0][:5]
         if folders:
