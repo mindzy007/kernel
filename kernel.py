@@ -80,7 +80,7 @@ QComboBox {{ background: transparent; border: none; padding: 10px 4px 10px 18px;
             font-size: 15px; min-width: 120px; }}
 QComboBox::drop-down {{ border: none; width: 34px; subcontrol-origin: padding; subcontrol-position: center right; }}
 QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
-QComboBox QAbstractItemView {{ background: transparent; border: none; padding: 6px; outline: none; }}
+QComboBox QAbstractItemView {{ background: transparent; border: none; padding: 10px; outline: none; }}
 """
 
 TWEAKS, APPS, GAMING, STORAGE, SPECS, ACTIVITY, SETTINGS = range(7)
@@ -1048,7 +1048,7 @@ class PathChip(QWidget):
         h = self._hover
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         p.setBrush(QColor(255, 255, 255, int(14 + 12 * h)))
-        p.setPen(QPen(QColor(255, 255, 255, int(34 + 24 * h)), 1))
+        p.setPen(QPen(QColor(255, 255, 255, int(14 + 10 * h)), 1))
         p.drawRoundedRect(r, 9, 9)
         x = self.PAD
         p.setFont(self.bold)
@@ -3084,6 +3084,8 @@ class FluentCombo(QComboBox):
         self.set_zoom_effects(True)
         self.set_progress(0.0)
         super().showPopup()
+        g = popup.geometry()
+        popup.setGeometry(g.x() - 8, g.y(), g.width() + 16, g.height())  # container 16px wider than the box
         self.zoom_from_bottom = popup.y() < self.mapToGlobal(QPoint(0, 0)).y()  # opened upwards
         popup.move(popup.x(), popup.y() + (-5 if self.zoom_from_bottom else 5))  # 5px more gap from the box
         self.animate_caret(True)
