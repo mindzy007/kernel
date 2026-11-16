@@ -37,7 +37,7 @@ from version import VERSION, UPDATE_REPO
 from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
-BG, BORDER, TEXT, MUTED = "#000000", "#1a1a1a", "#ffffff", "#7a7a7a"
+BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
 TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 18, 4, 56
@@ -61,13 +61,13 @@ QLabel {{ background: transparent; }}
 #section {{ color: {MUTED}; font-size: 14px; padding-left: 13px; }}
 #sidebar {{ background: {BG}; border-right: 1px solid {BORDER}; }}
 #footer {{ background: {BG}; border-top: 1px solid {BORDER}; }}
-QLineEdit#search {{ background: #101010; border: 1px solid #222222; border-radius: 12px;
+QLineEdit#search {{ background: #161616; border: 1px solid #262626; border-radius: 12px;
                    padding: 13px 16px; font-size: 16px; selection-background-color: #444444; }}
 QLineEdit#search:focus {{ border-color: #4a4a4a; }}
 #row {{ background: transparent; border: none; border-radius: 14px; }}
 QPlainTextEdit {{ background: transparent; border: 1px solid {BORDER}; border-radius: 12px; padding: 12px;
                  font-family: 'Cascadia Mono', Consolas; font-size: 14px; color: #bdbdbd; }}
-#metric {{ background: #080808; border: 1px solid {BORDER}; border-radius: 12px; }}
+#metric {{ background: #0f0f0f; border: 1px solid {BORDER}; border-radius: 12px; }}
 #metricValue {{ font-size: 22px; font-weight: 500; }}
 #attention {{ background: #100e08; border: 1px solid #55421c; border-radius: 14px; }}
 QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px; }}
@@ -335,8 +335,8 @@ class LogView(QPlainTextEdit):
 
 class Button(AnimButton):
     KINDS = {
-        "ghost": dict(base=(11, 11, 11), text=(240, 240, 240), size=15, weight=QFont.Normal,
-                      px=22, py=11, r=11, dis=(8, 8, 8), dis_text=(90, 90, 90)),
+        "ghost": dict(base=(17, 17, 17), text=(240, 240, 240), size=15, weight=QFont.Normal,
+                      px=22, py=11, r=11, dis=(13, 13, 13), dis_text=(90, 90, 90)),
         "accent": dict(base=(236, 90, 190), text=(255, 255, 255), size=16, weight=QFont.Medium,
                        px=36, py=15, r=16, dis=(30, 30, 30), dis_text=(100, 100, 100)),
     }
@@ -505,6 +505,18 @@ class NavButton(AnimButton):
 
     sel = Property(float, get_sel, set_sel)
 
+    # quicker, cursor-independent hover: the fill appears right away and fades out gently
+    def enterEvent(self, e):
+        self.go(self.a_hover, 1.0, 140, QEasingCurve.OutCubic)
+        QPushButton.enterEvent(self, e)
+
+    def leaveEvent(self, e):
+        self.go(self.a_hover, 0.0, 240, QEasingCurve.OutCubic)
+        QPushButton.leaveEvent(self, e)
+
+    def mouseMoveEvent(self, e):
+        QPushButton.mouseMoveEvent(self, e)  # no cursor-follow animation needed any more
+
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
@@ -512,13 +524,10 @@ class NavButton(AnimButton):
         r = QRectF(self.rect())
         path = QPainterPath()
         path.addRoundedRect(r, 10, 10)
-        self.spotlight(p, path, 150, BUTTON_GLOW * 0.85 * (1 - s))
-        edge = h * 0.3 * (1 - s)  # faint hover border; the selected highlight is drawn by the sidebar
-        if edge > 0.01:
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor(255, 255, 255, int(30 * edge)), 1))
-            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
-        t = max(s, h * 0.7)
+        fade = h * (1 - s)  # hover shows only on items that are not selected (the sidebar draws the selected one)
+        if fade > 0.01:
+            p.fillPath(path, QColor(255, 255, 255, int(9 * fade)))  # plain soft wash, no border
+        t = max(s, h * 0.75)
         c = QColor(int(lerp(122, 255, t)), int(lerp(122, 255, t)), int(lerp(122, 255, t)))
         p.setPen(c)
         gf = QFont("Segoe Fluent Icons")
@@ -2342,13 +2351,13 @@ class Panel(QFrame):
         # Source mode replaces whatever is underneath, so a partial repaint (a hovered row) can never
         # stack another tinted layer on top of the old one and leave dark boxes behind.
         p.setCompositionMode(QPainter.CompositionMode_Source)
-        p.fillPath(path, QColor(0, 0, 0, 255))
+        p.fillPath(path, QColor(BG))
         if self.bg:
             k = self.bg.width() / max(self.window().width(), 1)
             g = self.geometry()
             p.drawPixmap(QRectF(self.rect()), self.bg, QRectF(g.x() * k, g.y() * k, g.width() * k, g.height() * k))
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
-        p.fillPath(path, QColor(12, 12, 12, 150))
+        p.fillPath(path, QColor(18, 18, 18, 150))
         p.setClipping(False)
         p.setPen(QPen(QColor(255, 255, 255, 14), 1))
         p.drawPath(path)
@@ -2723,14 +2732,14 @@ class PopupBackdrop(QWidget):
         path = QPainterPath()
         path.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
         p.setClipPath(path)
-        p.fillPath(path, QColor(14, 14, 14))
+        p.fillPath(path, QColor(20, 20, 20))
         if self.blur is not None:
             win = self.combo.window()
             k = self.blur.width() / max(win.width(), 1)
             origin = win.mapFromGlobal(self.mapToGlobal(QPoint(0, 0)))
             p.drawPixmap(QRectF(self.rect()), self.blur,
                          QRectF(origin.x() * k, origin.y() * k, self.width() * k, self.height() * k))
-            p.fillPath(path, QColor(14, 14, 14, 115))
+            p.fillPath(path, QColor(20, 20, 20, 115))
         p.setClipping(False)
         p.setPen(QPen(QColor(255, 255, 255, 14), 1))
         p.drawPath(path)
@@ -2950,7 +2959,7 @@ class SegmentedFilter(QWidget):
         r = QRectF(self.rect())
         track = QPainterPath()
         track.addRoundedRect(r, self.RADIUS, self.RADIUS)
-        p.fillPath(track, QColor(11, 11, 11))
+        p.fillPath(track, QColor(17, 17, 17))
         edge = QPainterPath()
         edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
         p.setPen(QPen(QColor(255, 255, 255, 14), 1))
@@ -3160,7 +3169,7 @@ class FluentCombo(QComboBox):
         r = QRectF(self.rect())
         path = QPainterPath()
         path.addRoundedRect(r, 11, 11)
-        p.fillPath(path, QColor(11, 11, 11))
+        p.fillPath(path, QColor(17, 17, 17))
         inner = QPainterPath()
         inner.addRoundedRect(r.adjusted(1, 1, -1, -1), 10, 10)
         draw_spotlight(p, inner, self.rect(), self._cursor_pos, self._hover, 70, DROPDOWN_GLOW)
@@ -3534,7 +3543,7 @@ class TitleBar(QWidget):
             p.drawImage(0, py, soft, 0, sy, w, bh)
             p.setCompositionMode(QPainter.CompositionMode_SourceOver)
             p.setOpacity(1.0)
-            p.fillRect(QRect(0, py, w, bh), QColor(0, 0, 0, tint))
+            p.fillRect(QRect(0, py, w, bh), QColor(10, 10, 10, tint))
         fade_h = min(20, len(c["rows"]) // 4)
         if fade_h > 0:
             fade = QLinearGradient(0, len(c["rows"]) - fade_h, 0, len(c["rows"]))
@@ -3587,7 +3596,7 @@ class TitleBar(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         # the sidebar divider starts below the bar instead of being cut off by it
-        p.fillRect(QRectF(0, 0, self.win.sidebar.width() + 6, TITLEBAR_H), QColor(0, 0, 0))
+        p.fillRect(QRectF(0, 0, self.win.sidebar.width() + 6, TITLEBAR_H), QColor(BG))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self.window().windowHandle():
@@ -3613,8 +3622,8 @@ class SoftEdge(QWidget):
         b = self.bar
         p = QPainter(self)
         side = QLinearGradient(0, TITLEBAR_H, 0, TITLEBAR_H + SIDE_FADE)  # divider fades in below the bar
-        side.setColorAt(0.0, QColor(0, 0, 0, 255))
-        side.setColorAt(1.0, QColor(0, 0, 0, 0))
+        side.setColorAt(0.0, QColor(10, 10, 10, 255))
+        side.setColorAt(1.0, QColor(10, 10, 10, 0))
         p.fillRect(QRectF(0, TITLEBAR_H, b.win.sidebar.width() + 6, SIDE_FADE), side)
         if not b.blur or b.amount <= 0.0 or self.height() <= 0:
             return
@@ -3757,23 +3766,40 @@ class Sidebar(QFrame):
             rc = 10 + min(5.0, stretch * 0.04)  # corners round off a little as it stretches
             body = QPainterPath()
             body.addRoundedRect(r, rc, rc)
-            p.fillPath(body, QColor(10, 10, 10))  # solid, dark
+            fill = QLinearGradient(0, r.top(), 0, r.bottom())  # barely-there vertical depth
+            fill.setColorAt(0.0, QColor(15, 15, 16))
+            fill.setColorAt(1.0, QColor(12, 12, 13))
+            p.fillPath(body, QBrush(fill))
+            wash = QLinearGradient(r.left(), 0, r.left() + r.width() * 0.7, 0)  # accent bleeding in from the left
+            tint = QColor(self.accent)
+            tint.setAlpha(6)
+            wash.setColorAt(0.0, tint)
+            tint.setAlpha(0)
+            wash.setColorAt(1.0, tint)
+            p.fillPath(body, QBrush(wash))
             line = QLinearGradient(0, r.top(), 0, r.bottom())  # hairline border, brighter on top
-            line.setColorAt(0.0, QColor(255, 255, 255, 26))
-            line.setColorAt(1.0, QColor(255, 255, 255, 8))
+            line.setColorAt(0.0, QColor(255, 255, 255, 16))
+            line.setColorAt(1.0, QColor(255, 255, 255, 6))
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QBrush(line), 1))
             p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rc, rc)
-            ph = min(18.0 + stretch * 0.35, r.height() - 8)
+            ph = min(18.0 + stretch * 0.35, r.height() - 12)
+            bar = QRectF(r.left() + 6, r.center().y() - ph / 2, 3, ph)
+            for grow, alpha in ((5.0, 4), (3.0, 8), (1.5, 14)):  # soft glow around the accent bar
+                glow = QPainterPath()
+                glow.addRoundedRect(bar.adjusted(-grow, -grow, grow, grow), 1.5 + grow, 1.5 + grow)
+                gc = QColor(self.accent)
+                gc.setAlpha(alpha)
+                p.fillPath(glow, gc)
             pill = QPainterPath()  # accent pill on the left edge
-            pill.addRoundedRect(QRectF(r.left() + 4, r.center().y() - ph / 2, 3, ph), 1.5, 1.5)
+            pill.addRoundedRect(bar, 1.5, 1.5)
             pill_color = QColor(self.accent)
-            pill_color.setAlpha(235)
+            pill_color.setAlpha(210)
             p.fillPath(pill, pill_color)
         top = max(0, self.height() - self.FADE)
         g = QLinearGradient(0, top, 0, self.height())
-        g.setColorAt(0.0, QColor(0, 0, 0, 0))
-        g.setColorAt(1.0, QColor(0, 0, 0, 255))
+        g.setColorAt(0.0, QColor(10, 10, 10, 0))
+        g.setColorAt(1.0, QColor(10, 10, 10, 255))
         p.fillRect(QRectF(self.width() - 2, top, 2, self.height() - top), g)
 
 
