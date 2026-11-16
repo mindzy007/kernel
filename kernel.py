@@ -1267,17 +1267,20 @@ class DotPie(QWidget):
             g = self.owner[idx]
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
-            r = self.DOT * (0.3 + 0.7 * e) * (1 + 0.06 * pop)  # starts at 30% size: nothing pops out of thin air
-            p.setOpacity(e * (1.0 - 0.3 * dim * (1 - pop)))
-            p.setBrush(colors[g])
+            r = self.DOT * (0.3 + 0.7 * e) * (1 + 0.15 * pop)  # starts at 30% size: nothing pops out of thin air
+            p.setOpacity(e)
+            k = dim * (1 - pop)  # 0 for the hovered group, up to 1 for the others
+            c = colors[g].toHsv()
+            c.setHsv(c.hue(), int(c.saturation() * (1 - 0.8 * k)), int(c.value() * (1 - 0.6 * k)))
+            p.setBrush(c)
             p.drawEllipse(QPointF(cx + x, cy + y), r, r)
 
     def _hit(self, pos):
-        if self._sweep < 1.0:
-            return -1
         cx, cy = self.width() / 2, self.height() / 2
-        best, best_d = -1, (self.DOT + 3) ** 2
+        best, best_d = -1, (self.SPACING * 0.6) ** 2  # the gaps between dots count too: no dead spots
         for idx, (x, y) in enumerate(self.pts):
+            if self._sweep * 1.9 - self.norm[idx] <= 0:  # dots that have not appeared yet can't be hovered
+                continue
             d = (pos.x() - cx - x) ** 2 + (pos.y() - cy - y) ** 2
             if d <= best_d:
                 best, best_d = self.owner[idx], d
@@ -1299,7 +1302,7 @@ class DotPie(QWidget):
             self.settle.stop()
         elif idx != self._pending or not self.settle.isActive():
             self._pending = idx
-            self.settle.start(90 if idx < 0 else 55)  # leaving is slower than switching: no flicker in the gaps
+            self.settle.start(90 if idx < 0 else 15)  # leaving is slower than switching: no flicker in the gaps
 
     def leaveEvent(self, e):
         self._pending = -1
