@@ -3355,20 +3355,6 @@ class TitleBar(QWidget):
         self.title.setObjectName("h1")
         self.title.setStyleSheet("font-size: 19px; background: transparent;")
         lay.addSpacing(14)
-        icon_widget = QLabel()
-        icon_size = 18
-        icon_widget.setFixedSize(icon_size, icon_size)
-        icon_path = os.path.join(os.path.dirname(__file__), "icon.ico")
-        if os.path.exists(icon_path):
-            dpr = self.win.devicePixelRatioF()
-            px = round(icon_size * dpr)
-            pm = QIcon(icon_path).pixmap(QSize(px, px))
-            if not pm.isNull():
-                pm.setDevicePixelRatio(dpr)
-                icon_widget.setPixmap(pm)
-        icon_widget.setStyleSheet("background: transparent;")
-        lay.addWidget(icon_widget, 0, Qt.AlignVCenter)
-        lay.addSpacing(8)
         lay.addWidget(self.title)
         lay.addStretch()
         self.soft = None
@@ -3676,6 +3662,21 @@ class Sidebar(QFrame):
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.setInterval(8)
         self.timer.timeout.connect(self.tick)
+        self.ping = 0.0  # 0 = dim, 1 = bright: the accent bar's looping pulse
+        self.ping_anim = QVariantAnimation(self)
+        self.ping_anim.setDuration(1700)
+        self.ping_anim.setLoopCount(-1)
+        self.ping_anim.setStartValue(0.0)
+        self.ping_anim.setKeyValueAt(0.18, 1.0)  # quick snap up...
+        self.ping_anim.setEndValue(0.0)           # ...then a long smooth fade back down
+        self.ping_anim.valueChanged.connect(self._set_ping)
+        self.ping_anim.start()
+
+    def _set_ping(self, v):
+        self.ping = float(v)
+        if self.edges is not None and self.current is not None:  # repaint just the strip holding the bar
+            top, bottom = self.edges
+            self.update(QRect(int(self.current.x()), int(top) - 8, 40, int(bottom - top) + 16))
 
     def set_accent(self, color):
         self.accent = QColor(color)
@@ -3785,16 +3786,17 @@ class Sidebar(QFrame):
             p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), rc, rc)
             ph = min(18.0 + stretch * 0.35, r.height() - 12)
             bar = QRectF(r.left() + 6, r.center().y() - ph / 2, 3, ph)
-            for grow, alpha in ((5.0, 4), (3.0, 8), (1.5, 14)):  # soft glow around the accent bar
+            k = self.ping * self.ping * (3 - 2 * self.ping)  # smoothstep: no hard corners at the peak
+            for grow, alpha in ((5.0, 4 + 8 * k), (3.0, 8 + 14 * k), (1.5, 14 + 22 * k)):  # soft glow around the accent bar
                 glow = QPainterPath()
                 glow.addRoundedRect(bar.adjusted(-grow, -grow, grow, grow), 1.5 + grow, 1.5 + grow)
                 gc = QColor(self.accent)
-                gc.setAlpha(alpha)
+                gc.setAlpha(int(alpha))
                 p.fillPath(glow, gc)
             pill = QPainterPath()  # accent pill on the left edge
             pill.addRoundedRect(bar, 1.5, 1.5)
             pill_color = QColor(self.accent)
-            pill_color.setAlpha(210)
+            pill_color.setAlpha(int(lerp(120, 255, k)))
             p.fillPath(pill, pill_color)
         top = max(0, self.height() - self.FADE)
         g = QLinearGradient(0, top, 0, self.height())
