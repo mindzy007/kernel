@@ -2352,7 +2352,7 @@ class Panel(QFrame):
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
         p.fillPath(path, QColor(12, 12, 12, 150))
         p.setClipping(False)
-        p.setPen(QPen(QColor(255, 255, 255, 28), 1))
+        p.setPen(QPen(QColor(255, 255, 255, 14), 1))
         p.drawPath(path)
 
 
@@ -2962,8 +2962,8 @@ class SegmentedFilter(QWidget):
         rad = self.RADIUS - inset + 2
         thumb_path = QPainterPath()
         thumb_path.addRoundedRect(thumb, rad, rad)
-        p.fillPath(thumb_path, QColor(255, 255, 255, 24))
-        p.setPen(QPen(QColor(255, 255, 255, 20), 1))
+        p.fillPath(thumb_path, QColor(255, 255, 255, 14))
+        p.setPen(QPen(QColor(255, 255, 255, 14), 1))
         thumb_edge = QPainterPath()
         thumb_edge.addRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
         p.drawPath(thumb_edge)
@@ -3075,6 +3075,9 @@ class FluentCombo(QComboBox):
             elif kind == QEvent.MouseMove:
                 self.glide(self.a_cursor, QPointF(event.position()), 130, QEasingCurve.OutCubic)
         return super().eventFilter(obj, event)
+
+    def wheelEvent(self, e):
+        e.ignore()  # scrolling over the box never changes the choice; the page scrolls instead
 
     def showPopup(self):
         popup = self.view().window()
