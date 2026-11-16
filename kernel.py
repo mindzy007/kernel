@@ -1258,7 +1258,6 @@ class DotPie(QWidget):
         cx, cy = self.width() / 2, self.height() / 2
         dim = max(self.pops) if self.pops else 0.0
         colors = [QColor(sl[2]) for sl in self.slices]
-        shine = QColor(255, 255, 255, 46)
         for idx, (x, y) in enumerate(self.pts):
             # centre first, edge last, with a wide overlap so the dots flow outward like a ripple
             appear = min(1.0, max(0.0, (self._sweep * 1.9 - self.norm[idx]) / 0.9))
@@ -1272,8 +1271,6 @@ class DotPie(QWidget):
             p.setOpacity(e * (1.0 - 0.3 * dim * (1 - pop)))
             p.setBrush(colors[g])
             p.drawEllipse(QPointF(cx + x, cy + y), r, r)
-            p.setBrush(shine)  # a soft highlight gives each dot a little volume
-            p.drawEllipse(QPointF(cx + x - r * 0.26, cy + y - r * 0.3), r * 0.52, r * 0.46)
 
     def _hit(self, pos):
         if self._sweep < 1.0:
