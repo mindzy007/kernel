@@ -4583,7 +4583,7 @@ class Kernel(QWidget):
         apps_header.addStretch()
         self.apps_drive = ""  # "" = every drive, else a root like "D:\\"
         self.drive_filter = FluentCombo()
-        self.drive_filter.setFixedWidth(150)
+        self.drive_filter.setFixedWidth(260)
         self.drive_filter.addItem("All drives", "")
         self.drive_filter.setVisible(False)  # only shown when there is more than one drive
         self.drive_filter.activated.connect(self.on_apps_filter)
@@ -4638,7 +4638,7 @@ class Kernel(QWidget):
                     w.deleteLater()
             self.drive_rows = {}
             self.storage_apps = {}
-            self.update_drive_filter(roots)
+            self.update_drive_filter(items)
             for root, label, free, total in items:
                 row = DriveRow(f"{label} ({root[:2]})", "")
                 row.text_col.setSpacing(7)  # more air between the name, usage line and legend
@@ -4814,19 +4814,19 @@ class Kernel(QWidget):
         row.right.addWidget(u)
         return row
 
-    def update_drive_filter(self, roots):
+    def update_drive_filter(self, items):
         """Keep the drive filter in step with the drives that exist, remembering the current pick."""
         self.drive_filter.blockSignals(True)
         self.drive_filter.clear()
         self.drive_filter.addItem("All drives", "")
-        for root in roots:
-            self.drive_filter.addItem(f"Drive {root[:2]}", root)
+        for root, label, _free, total in items:
+            self.drive_filter.addItem(f"{label} ({root[:2]}) - {apps.human(total)}", root)
         idx = self.drive_filter.findData(self.apps_drive)
         if idx < 0:
             idx, self.apps_drive = 0, ""
         self.drive_filter.setCurrentIndex(idx)
         self.drive_filter.blockSignals(False)
-        self.drive_filter.setVisible(len(roots) > 1)
+        self.drive_filter.setVisible(len(items) > 1)
 
     def on_apps_filter(self, _=None):
         self.apps_drive = self.drive_filter.currentData() or ""
