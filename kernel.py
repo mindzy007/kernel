@@ -2862,6 +2862,120 @@ class ZoomEffect(QGraphicsEffect):
         painter.restore()
 
 
+class SegmentedFilter(QWidget):
+    """Filter switch in the same material as the dropdown: flat dark fill, 1px edge, a soft thumb that glides."""
+    activated = Signal(int)
+    PAD, RADIUS = 4, 11
+
+    def __init__(self, options, height=40):
+        super().__init__()
+        self.options = options  # [(label, data), ...]
+        self.index = 0
+        self._pos = 0.0  # thumb position, in segments
+        self._hov = [0.0] * len(options)  # per-segment hover fade, 0..1
+        f = QFont(QApplication.font())
+        f.setFamily(self.font().family())
+        f.setPixelSize(15)
+        f.setStyleStrategy(QFont.PreferAntialias | QFont.NoSubpixelAntialias)
+        f.setHintingPreference(QFont.PreferNoHinting)
+        self.setFont(f)
+        fm = QFontMetrics(f)
+        self.seg_w = max(fm.horizontalAdvance(t) for t, _ in options) + 36
+        self.setFixedSize(self.seg_w * len(options) + self.PAD * 2, height)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.anim = QVariantAnimation(self)
+        self.anim.setDuration(320)
+        self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.anim.valueChanged.connect(self._set_pos)
+        self.hover_anims = []
+        for i in range(len(options)):
+            a = QVariantAnimation(self)
+            a.setDuration(180)
+            a.setEasingCurve(QEasingCurve.OutCubic)
+            a.valueChanged.connect(lambda v, i=i: self._set_hov(i, v))
+            self.hover_anims.append(a)
+
+    def _set_pos(self, v):
+        self._pos = float(v)
+        self.update()
+
+    def _set_hov(self, i, v):
+        self._hov[i] = float(v)
+        self.update()
+
+    def _hover_to(self, i, target):
+        a = self.hover_anims[i]
+        a.stop()
+        a.setStartValue(self._hov[i])
+        a.setEndValue(target)
+        a.start()
+
+    def currentData(self):
+        return self.options[self.index][1]
+
+    def setCurrentIndex(self, i):
+        self.index = i
+        self._pos = float(i)
+        self.update()
+
+    def _segment_at(self, x):
+        return max(0, min(len(self.options) - 1, int((x - self.PAD) // self.seg_w)))
+
+    def mouseMoveEvent(self, e):
+        over = self._segment_at(e.position().x())
+        for i in range(len(self.options)):
+            want = 1.0 if i == over else 0.0
+            if abs(self.hover_anims[i].endValue() or 0.0) != want:
+                self._hover_to(i, want)
+
+    def leaveEvent(self, _):
+        for i in range(len(self.options)):
+            self._hover_to(i, 0.0)
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        i = self._segment_at(e.position().x())
+        if i == self.index:
+            return
+        self.index = i
+        self.anim.stop()
+        self.anim.setStartValue(self._pos)
+        self.anim.setEndValue(float(i))
+        self.anim.start()
+        self.activated.emit(i)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        r = QRectF(self.rect())
+        track = QPainterPath()
+        track.addRoundedRect(r, self.RADIUS, self.RADIUS)
+        p.fillPath(track, QColor(11, 11, 11))
+        edge = QPainterPath()
+        edge.addRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
+        p.setPen(QPen(QColor(255, 255, 255, 22), 1))
+        p.drawPath(edge)
+        inset = self.PAD
+        thumb = QRectF(inset + self._pos * self.seg_w, inset, self.seg_w, self.height() - inset * 2)
+        rad = self.RADIUS - inset + 2
+        thumb_path = QPainterPath()
+        thumb_path.addRoundedRect(thumb, rad, rad)
+        p.fillPath(thumb_path, QColor(255, 255, 255, 24))
+        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        thumb_edge = QPainterPath()
+        thumb_edge.addRoundedRect(thumb.adjusted(0.5, 0.5, -0.5, -0.5), rad, rad)
+        p.drawPath(thumb_edge)
+        for i, (text, _) in enumerate(self.options):
+            seg = QRectF(inset + i * self.seg_w, 0, self.seg_w, self.height())
+            near = 1.0 - min(1.0, abs(self._pos - i))  # 1 under the thumb, 0 away from it
+            base = 122 + 70 * self._hov[i]
+            v = int(base + (255 - base) * near)
+            p.setPen(QColor(v, v, v))
+            p.drawText(seg, Qt.AlignCenter, text)
+
+
 class FluentCombo(QComboBox):
     FADE_IN_MS, FADE_OUT_MS = 320, 220
     ZOOM_FROM = 0.965
@@ -4587,10 +4701,8 @@ class Kernel(QWidget):
         self.drive_filter.addItem("All drives", "")
         self.drive_filter.setVisible(False)  # only shown when there is more than one drive
         self.drive_filter.activated.connect(self.on_apps_filter)
-        self.sort_filter = FluentCombo()
-        self.sort_filter.setFixedWidth(150)
-        self.sort_filter.addItem("Biggest first", True)
-        self.sort_filter.addItem("Smallest first", False)
+        self.sort_filter = SegmentedFilter([("Biggest", True), ("Smallest", False)],
+                                          self.drive_filter.sizeHint().height())
         self.sort_filter.activated.connect(self.on_apps_filter)
         apps_header.addWidget(self.drive_filter)
         apps_header.addSpacing(8)
