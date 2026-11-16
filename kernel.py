@@ -200,19 +200,17 @@ def lerp(a, b, t):
 
 
 def draw_spotlight(p, path, rect, center, strength, radius, alpha):
-    """Soft white glow around `center`, clipped to `path`; `strength` (0..1) is the animated hover amount.
-    Buttons, the closed dropdown and the dropdown rows all use this so they share one highlight look."""
-    a = alpha * strength
+    """Hover highlight: a soft white wash over the whole shape (clipped to `path`), faded by `strength` (0..1).
+    Buttons, the closed dropdown and the dropdown rows all use this so they share one highlight look.
+    `center` and `radius` are unused now (the old cursor-following glow) and kept so callers stay as they are."""
+    a = alpha * strength * 0.7  # flat fill: a bit under the old glow's peak so the whole area isn't brighter than before
     if a < 0.05:
         return
-    glow = QRadialGradient(center, radius)
-    for stop, k in ((0.0, 1.0), (0.3, 0.55), (0.65, 0.16), (1.0, 0.0)):
-        c = QColor(255, 255, 255)
-        c.setAlphaF(a * k / 255.0)
-        glow.setColorAt(stop, c)
+    c = QColor(255, 255, 255)
+    c.setAlphaF(min(1.0, a / 255.0))
     p.save()
     p.setClipPath(path)
-    p.fillRect(rect, QBrush(glow))
+    p.fillRect(rect, c)
     p.restore()
 
 
