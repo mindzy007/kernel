@@ -1268,10 +1268,11 @@ class DotPie(QWidget):
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
             r = self.DOT * (0.3 + 0.7 * e) * (1 + 0.08 * pop)  # starts at 30% size: nothing pops out of thin air
-            p.setOpacity(e)
             k = dim * (1 - pop)  # 0 for the hovered group, up to 1 for the others
-            c = colors[g].toHsv()
-            c.setHsv(c.hue(), int(c.saturation() * (1 - 0.5 * k)), int(c.value() * (1 - 0.35 * k * c.value() / 255)))
+            p.setOpacity(e * (1 - 0.2 * k))
+            c = colors[g].toHsl()  # HSL keeps lightness when desaturating: dark colours don't wash out
+            c.setHsl(c.hue(), int(c.hslSaturation() * (1 - 0.35 * k)),
+                     int(c.lightness() * (1 - 0.25 * k * c.lightness() / 255)))
             p.setBrush(c)
             p.drawEllipse(QPointF(cx + x, cy + y), r, r)
 
@@ -1467,7 +1468,7 @@ class DrivePanel(QWidget):
         for i, (w, fx) in enumerate(self.lines):
             anim = QPropertyAnimation(fx, b"opacity", w)
             anim.setDuration(140)
-            anim.setEndValue(0.35 if idx >= 0 and i != idx else 1.0)
+            anim.setEndValue(0.4 if idx >= 0 and i != idx else 1.0)
             w._anim = anim  # keep a reference so it is not garbage collected
             anim.start()
 
