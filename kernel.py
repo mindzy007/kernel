@@ -1467,7 +1467,7 @@ class DrivePanel(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 9))
+        p.setBrush(QColor(255, 255, 255, 5))
         p.drawRoundedRect(QRectF(self.rect()), 14, 14)
 
     def _dim_lines(self, idx):
