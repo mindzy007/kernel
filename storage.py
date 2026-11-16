@@ -5,6 +5,7 @@ import re
 import shutil
 import string
 import subprocess
+import threading
 import time
 import winreg
 from concurrent.futures import ThreadPoolExecutor
@@ -90,7 +91,7 @@ def is_removable(root):
         return False
 
 
-def load_cache(path, roots, max_age=3600):
+def load_cache(path, roots, max_age=6 * 3600):
     """Saved scan results {root: result} if they are fresh and cover exactly these drives, else None."""
     try:
         with open(path, encoding="utf-8") as f:
@@ -111,15 +112,32 @@ def save_cache(path, drives):
         pass
 
 
+_POOL = None
+_POOL_LOCK = threading.Lock()
+
+
+def _pool():
+    """One small pool shared by every scan. Fewer busy Python threads means less GIL fighting with the UI."""
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = ThreadPoolExecutor(2, initializer=lower_priority)
+        return _POOL
+
+
 def size_of(path):
     """Total bytes under path (files only, symlinks not followed)."""
     total = 0
+    count = 0
     stack = [path]
     while stack:
         cur = stack.pop()
         try:
             with os.scandir(cur) as it:
                 for e in it:
+                    count += 1
+                    if count % 200 == 0:
+                        time.sleep(0.001)  # hand the GIL to the UI thread
                     try:
                         if e.is_symlink():
                             continue
@@ -151,8 +169,7 @@ def sized_children(folder):
         entries = list(os.scandir(folder))
     except OSError:
         return []
-    with ThreadPoolExecutor(4, initializer=lower_priority) as pool:
-        return [r for r in pool.map(_entry_size, entries) if r]
+    return [r for r in _pool().map(_entry_size, entries) if r]
 
 
 def largest(folder, limit=10):
@@ -405,18 +422,22 @@ def _steam_apps():
                 install = re.search(r'"installdir"\s+"([^"]+)"', text).group(1)
             except (OSError, AttributeError):
                 continue
+            if not os.path.isdir(os.path.join(folder, "common", install)):
+                continue  # folder was deleted or moved by hand: stale manifest, skip it
             size = re.search(r'"SizeOnDisk"\s+"(\d+)"', text)
             out.append({"name": name.replace("\\\\", "\\"), "publisher": "Steam",
                         "location": os.path.join(folder, "common", install), "estimate": int(size.group(1)) if size else 0,
-                        "command": None, "uri": f"steam://uninstall/{app_id}", "uwp": False})
+                        "command": None, "uri": f"steam://uninstall/{app_id}", "uwp": False, "trusted": True})
     return out
 
 
 def installed_apps():
     """Installed desktop apps, Steam games and Store apps with sizes: list of dicts."""
     items = _registry_apps() + _steam_apps() + _appx_apps()
-    with ThreadPoolExecutor(4, initializer=lower_priority) as pool:
-        sizes = list(pool.map(lambda it: size_of(it["location"]) if it["location"] else it["estimate"], items))
+    # Steam already reports each game's size: no need to walk those huge folders.
+    sizes = list(_pool().map(
+        lambda it: it["estimate"] if it.get("trusted") and it["estimate"] else
+        (size_of(it["location"]) if it["location"] else it["estimate"]), items))
     launch = launcher_game_dirs()
     kept, seen = [], set()
     for it, size in sorted(zip(items, sizes), key=lambda p: p[1], reverse=True):
