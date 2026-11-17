@@ -5695,6 +5695,21 @@ class Kernel(QWidget):
             b.clicked.connect(fn)
             self.dl_row.right.addWidget(b)
         page.add(self.dl_row)
+        page.section("Feedback")
+        self.bug_row = Row("Report a bug", BUG_HINT)
+        self.bug_send = Button("Send")
+        self.bug_send.clicked.connect(self.send_bug_report)
+        self.bug_row.right.addWidget(self.bug_send)
+        page.add(self.bug_row)
+        self.bug_text = QPlainTextEdit()
+        self.bug_text.setObjectName("bugText")
+        self.bug_text.setStyleSheet(  # app font (not the log's monospace), text inset to line up with the row text above
+            f"QPlainTextEdit#bugText {{ font-family: '{QApplication.font().family()}'; font-size: 15px; "
+            f"color: {TEXT}; padding: 12px 15px; border-radius: 14px; }}")
+        self.bug_text.setPlaceholderText("What happened? What did you expect to happen?")
+        self.bug_text.setFixedHeight(120)
+        page.add(self.bug_text)
+        self.bug_sent.connect(self.show_bug_result)
         page.section("About")
         self.update_url = self.update_tag = self.update_file = ""
         self.update_job = None
@@ -5709,17 +5724,6 @@ class Kernel(QWidget):
         self.about_row.right.addWidget(self.update_button)
         self.update_checked.connect(self.show_update_result)
         page.add(self.about_row)
-        page.section("Feedback")
-        self.bug_row = Row("Report a bug", BUG_HINT)
-        self.bug_send = Button("Send")
-        self.bug_send.clicked.connect(self.send_bug_report)
-        self.bug_row.right.addWidget(self.bug_send)
-        page.add(self.bug_row)
-        self.bug_text = QPlainTextEdit()
-        self.bug_text.setPlaceholderText("What happened? What did you expect to happen?")
-        self.bug_text.setFixedHeight(120)
-        page.add(self.bug_text)
-        self.bug_sent.connect(self.show_bug_result)
         page.col.addStretch()
         return page
 
