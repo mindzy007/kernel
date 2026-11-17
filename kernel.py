@@ -271,11 +271,11 @@ class AnimButton(QPushButton):
 
     def enterEvent(self, e):
         self.snap_cursor(e.position())
-        self.go(self.a_hover, 1.0, 420, QEasingCurve.InOutSine)
+        self.go(self.a_hover, 1.0, 130, QEasingCurve.OutCubic)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self.go(self.a_hover, 0.0, 520, QEasingCurve.InOutSine)
+        self.go(self.a_hover, 0.0, 220, QEasingCurve.OutCubic)
         super().leaveEvent(e)
 
     def mouseMoveEvent(self, e):
