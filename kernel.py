@@ -37,7 +37,7 @@ from version import VERSION, UPDATE_REPO
 from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
-SIDEBAR_BG = "#0d0d0e"  # a hair lighter than BG: the sidebar is told apart by tone, not by a line
+SIDEBAR_BG = "#060606"  # a touch darker than BG: the sidebar is told apart by tone, not by a line
 BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
@@ -3617,7 +3617,6 @@ class SoftEdge(QWidget):
             b.schedule()
         p.setOpacity(b.amount)
         p.drawImage(QRectF(x, 0, w, self.height()), img, QRectF(0, 0, img.width(), img.height()))
-        p.fillRect(QRectF(x, TITLEBAR_H - 1, w, 1), QColor(255, 255, 255, 20))  # hairline under the glass
 
 
 
@@ -3760,17 +3759,7 @@ class Sidebar(QFrame):
             rc = 10 + min(5.0, stretch * 0.04)  # corners round off a little as it stretches
             body = QPainterPath()
             body.addRoundedRect(r, rc, rc)
-            fill = QLinearGradient(0, r.top(), 0, r.bottom())  # barely-there vertical depth
-            fill.setColorAt(0.0, QColor(15, 15, 16))
-            fill.setColorAt(1.0, QColor(12, 12, 13))
-            p.fillPath(body, QBrush(fill))
-            wash = QLinearGradient(r.left(), 0, r.left() + r.width() * 0.7, 0)  # accent bleeding in from the left
-            tint = QColor(self.accent)
-            tint.setAlpha(6)
-            wash.setColorAt(0.0, tint)
-            tint.setAlpha(0)
-            wash.setColorAt(1.0, tint)
-            p.fillPath(body, QBrush(wash))
+            p.fillPath(body, QColor(BG))  # same colour as the main app background
             line = QLinearGradient(0, r.top(), 0, r.bottom())  # hairline border, brighter on top
             line.setColorAt(0.0, QColor(255, 255, 255, 16))
             line.setColorAt(1.0, QColor(255, 255, 255, 6))
