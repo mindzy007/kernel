@@ -37,11 +37,12 @@ from version import VERSION, UPDATE_REPO
 from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
+SIDEBAR_BG = "#0d0d0e"  # a hair lighter than BG: the sidebar is told apart by tone, not by a line
 BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
-TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 18, 4, 56
-TINT = 165  # darkness (0-255) of the title bar blur
+TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 2, 0, 56
+TINT = 120  # darkness (0-255) of the title bar blur (frosted glass: lighter than a solid dark bar)
 BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
 ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
@@ -59,7 +60,7 @@ QLabel {{ background: transparent; }}
 #h1 {{ font-size: 28px; font-weight: 500; }}
 #title {{ font-size: 30px; font-weight: 500; padding-left: 13px; }}
 #section {{ color: {MUTED}; font-size: 14px; padding-left: 13px; }}
-#sidebar {{ background: {BG}; border-right: 1px solid {BORDER}; }}
+#sidebar {{ background: {SIDEBAR_BG}; border: none; }}
 #footer {{ background: {BG}; border-top: 1px solid {BORDER}; }}
 QLineEdit#search {{ background: #161616; border: 1px solid #262626; border-radius: 12px;
                    padding: 13px 16px; font-size: 16px; selection-background-color: #444444; }}
@@ -3531,14 +3532,7 @@ class TitleBar(QWidget):
             p.setCompositionMode(QPainter.CompositionMode_SourceOver)
             p.setOpacity(1.0)
             p.fillRect(QRect(0, py, w, bh), QColor(10, 10, 10, tint))
-        fade_h = min(20, len(c["rows"]) // 4)
-        if fade_h > 0:
-            fade = QLinearGradient(0, len(c["rows"]) - fade_h, 0, len(c["rows"]))
-            fade.setColorAt(0.0, QColor(255, 255, 255, 255))
-            fade.setColorAt(1.0, QColor(255, 255, 255, 0))
-            p.setCompositionMode(QPainter.CompositionMode_DestinationIn)
-            p.fillRect(QRect(0, len(c["rows"]) - fade_h, w, fade_h), fade)
-        p.end()
+        p.end()  # no bottom fade: the frosted bar ends on a clean edge, like macOS / iOS
         return out, dpr
 
     def viewport_x(self, page):
@@ -3557,8 +3551,8 @@ class TitleBar(QWidget):
     def refresh(self):
         page = self.win.current_scroll_area()
         value = page.verticalScrollBar().value() if page is not None else 0
-        # Blur starts at 40% opacity at top, builds to 100% over 140px scroll
-        target = 0.0 if page is None else min(1.0, 0.4 + value / 140.0)  # min 0.4 blur at top, builds up over scrolling
+        # No blur at rest (nothing is under the bar yet); full blur after just 16px of scroll
+        target = 0.0 if page is None else min(1.0, value / 16.0)
         if target > 0.0:
             c = self.cache
             zone = TITLEBAR_H + TITLEBAR_SOFT
@@ -3582,8 +3576,9 @@ class TitleBar(QWidget):
     # ===== PAINT_EVENT: Draw the blurred title bar =====
     def paintEvent(self, _):
         p = QPainter(self)
-        # the sidebar divider starts below the bar instead of being cut off by it
-        p.fillRect(QRectF(0, 0, self.win.sidebar.width() + 6, TITLEBAR_H), QColor(BG))
+        # the bar's left part has the sidebar's tone so the two read as one column
+        p.fillRect(QRectF(0, 0, self.win.sidebar.width(), TITLEBAR_H), QColor(SIDEBAR_BG))
+        p.fillRect(QRectF(self.win.sidebar.width(), 0, 6, TITLEBAR_H), QColor(BG))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self.window().windowHandle():
@@ -3608,10 +3603,6 @@ class SoftEdge(QWidget):
     def paintEvent(self, _):
         b = self.bar
         p = QPainter(self)
-        side = QLinearGradient(0, TITLEBAR_H, 0, TITLEBAR_H + SIDE_FADE)  # divider fades in below the bar
-        side.setColorAt(0.0, QColor(10, 10, 10, 255))
-        side.setColorAt(1.0, QColor(10, 10, 10, 0))
-        p.fillRect(QRectF(0, TITLEBAR_H, b.win.sidebar.width() + 6, SIDE_FADE), side)
         if not b.blur or b.amount <= 0.0 or self.height() <= 0:
             return
         img, bx, bw, dpr = b.blur
@@ -3626,6 +3617,7 @@ class SoftEdge(QWidget):
             b.schedule()
         p.setOpacity(b.amount)
         p.drawImage(QRectF(x, 0, w, self.height()), img, QRectF(0, 0, img.width(), img.height()))
+        p.fillRect(QRectF(x, TITLEBAR_H - 1, w, 1), QColor(255, 255, 255, 20))  # hairline under the glass
 
 
 
@@ -3799,11 +3791,6 @@ class Sidebar(QFrame):
             pill_color = QColor(self.accent)
             pill_color.setAlpha(int(lerp(120, 255, k)))
             p.fillPath(pill, pill_color)
-        top = max(0, self.height() - self.FADE)
-        g = QLinearGradient(0, top, 0, self.height())
-        g.setColorAt(0.0, QColor(10, 10, 10, 0))
-        g.setColorAt(1.0, QColor(10, 10, 10, 255))
-        p.fillRect(QRectF(self.width() - 2, top, 2, self.height() - top), g)
 
 
 class Kernel(QWidget):
