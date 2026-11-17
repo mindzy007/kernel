@@ -37,6 +37,8 @@ from version import VERSION, UPDATE_REPO
 from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
+FORMSPREE_URL = "https://formspree.io/f/mqpqqlda"  # paste your Formspree form endpoint here
+BUG_HINT = "Tell me what went wrong. Your message, app version and Windows version are sent."
 SIDEBAR_BG = "#060606"  # a touch darker than BG: the sidebar is told apart by tone, not by a line
 BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
@@ -3822,6 +3824,7 @@ class Kernel(QWidget):
     monitor_error = Signal(str)
     monitor_finished = Signal(int, str)
     update_checked = Signal(int, str, str, str)
+    bug_sent = Signal(bool, str)
 
     def __init__(self):
         super().__init__()
@@ -5627,8 +5630,64 @@ class Kernel(QWidget):
         self.about_row.right.addWidget(self.update_button)
         self.update_checked.connect(self.show_update_result)
         page.add(self.about_row)
+        page.section("Feedback")
+        self.bug_row = Row("Report a bug", BUG_HINT)
+        self.bug_send = Button("Send")
+        self.bug_send.clicked.connect(self.send_bug_report)
+        self.bug_row.right.addWidget(self.bug_send)
+        page.add(self.bug_row)
+        self.bug_text = QPlainTextEdit()
+        self.bug_text.setPlaceholderText("What happened? What did you expect to happen?")
+        self.bug_text.setFixedHeight(120)
+        page.add(self.bug_text)
+        self.bug_sent.connect(self.show_bug_result)
         page.col.addStretch()
         return page
+
+    def set_bug_status(self, text, color="", reset_ms=0):
+        self.bug_row.sub.setStyleSheet(f"color: {color};" if color else "")
+        self.bug_row.sub.setText(text)
+        if reset_ms:
+            QTimer.singleShot(reset_ms, lambda: self.set_bug_status(BUG_HINT))
+
+    def send_bug_report(self):
+        text = self.bug_text.toPlainText().strip()
+        if "YOUR_FORM_ID" in FORMSPREE_URL or not FORMSPREE_URL:
+            self.set_bug_status("Bug reports are not set up in this build yet.", "#e06c6c", 6000)
+            return
+        if len(text) < 5:
+            self.set_bug_status("Write a few words about the problem first.", "#e5a64a", 5000)
+            return
+        if time.time() - getattr(self, "bug_last", 0) < 30:
+            self.set_bug_status("Please wait a moment before sending another report.", "#e5a64a", 5000)
+            return
+        import platform
+        payload = {"_subject": f"Kernel bug report (v{VERSION})", "message": text[:4000],
+                   "app_version": VERSION, "windows": platform.platform()}
+        self.bug_send.setEnabled(False)
+        self.set_bug_status("Sending...")
+        threading.Thread(target=self._post_bug, args=(payload,), daemon=True).start()
+
+    def _post_bug(self, payload):
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                FORMSPREE_URL, data=json.dumps(payload).encode("utf-8"), method="POST",
+                headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": "Kernel"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                ok = 200 <= r.status < 300
+            self.bug_sent.emit(ok, "" if ok else "The server rejected the report.")
+        except Exception:
+            self.bug_sent.emit(False, "Could not reach the server. Check your connection.")
+
+    def show_bug_result(self, ok, message):
+        self.bug_send.setEnabled(True)
+        if ok:
+            self.bug_last = time.time()
+            self.bug_text.clear()
+            self.set_bug_status("Sent. Thank you!", "#6ccf6c", 6000)
+        else:
+            self.set_bug_status(message, "#e06c6c", 8000)
 
     def check_for_updates(self):
         if self.update_pending:
