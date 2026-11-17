@@ -42,7 +42,7 @@ BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
 TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 2, 0, 56
-TINT = 110  # darkness (0-255) of the title bar blur (frosted glass: lighter than a solid dark bar)
+TINT = 140  # darkness (0-255) of the title bar blur (frosted glass: lighter than a solid dark bar)
 BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
 ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
@@ -3531,7 +3531,7 @@ class TitleBar(QWidget):
             p.drawImage(0, py, soft, 0, sy, w, bh)
             p.setCompositionMode(QPainter.CompositionMode_SourceOver)
             p.setOpacity(1.0)
-            p.fillRect(QRect(0, py, w, bh), QColor(17, 17, 17, tint))
+            p.fillRect(QRect(0, py, w, bh), QColor(10, 10, 10, tint))
         p.end()  # no bottom fade: the frosted bar ends on a clean edge, like macOS / iOS
         return out, dpr
 
@@ -3578,7 +3578,6 @@ class TitleBar(QWidget):
         p = QPainter(self)
         # the bar's left part has the sidebar's tone so the two read as one column
         p.fillRect(QRectF(0, 0, self.win.sidebar.width(), TITLEBAR_H), QColor(SIDEBAR_BG))
-        p.fillRect(QRectF(self.win.sidebar.width(), 0, 6, TITLEBAR_H), QColor(BG))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self.window().windowHandle():
