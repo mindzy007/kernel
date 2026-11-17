@@ -1430,6 +1430,33 @@ def drive_capacity(total):
     return f"{near if abs(near - gb) / near < 0.07 else round(gb)} GB"
 
 
+class DimOverlay(QWidget):
+    """Dims the line it sits on by painting the panel colour over it. (A graphics effect would do the same,
+    but widgets with an effect are drawn at the wrong offset when the title bar blur copies the page.)"""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.amount = 0.0
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        parent.installEventFilter(self)
+        self.setGeometry(parent.rect())
+        self.hide()
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Resize:
+            self.setGeometry(self.parent().rect())
+        return False
+
+    def set_amount(self, v):
+        self.amount = float(v)
+        self.setVisible(self.amount > 0.01)
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, _):
+        QPainter(self).fillRect(self.rect(), QColor(12, 12, 12, int(255 * self.amount)))
+
+
 class DrivePanel(QWidget):
     """Details for one drive: a 3D pie plus the stats that matter (used/free, breakdown, biggest folders)."""
 
@@ -1462,7 +1489,7 @@ class DrivePanel(QWidget):
         self.right.setSpacing(16)
         lay.addLayout(self.right, 1)
         self.default_caption, self.total = "", 0
-        self.lines = []  # (widget, opacity effect) of each breakdown line, in slice order
+        self.lines = []  # (widget, dim overlay) of each breakdown line, in slice order
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -1473,10 +1500,12 @@ class DrivePanel(QWidget):
 
     def _dim_lines(self, idx):
         """Fade every breakdown line except the hovered one (all full again when nothing is hovered)."""
-        for i, (w, fx) in enumerate(self.lines):
-            anim = QPropertyAnimation(fx, b"opacity", w)
+        for i, (w, ov) in enumerate(self.lines):
+            anim = QVariantAnimation(w)
             anim.setDuration(140)
-            anim.setEndValue(0.4 if idx >= 0 and i != idx else 1.0)
+            anim.setStartValue(ov.amount)
+            anim.setEndValue(0.6 if idx >= 0 and i != idx else 0.0)
+            anim.valueChanged.connect(ov.set_amount)
             w._anim = anim  # keep a reference so it is not garbage collected
             anim.start()
 
@@ -1590,10 +1619,7 @@ class DrivePanel(QWidget):
             col.setSpacing(9)
             for name, size, color in self.pie.slices:
                 line = self._line(color, name, apps.human(size), self._pct(size))
-                fx = QGraphicsOpacityEffect(line)
-                fx.setOpacity(1.0)
-                line.setGraphicsEffect(fx)
-                self.lines.append((line, fx))
+                self.lines.append((line, DimOverlay(line)))
                 col.addWidget(line)
             self.right.addLayout(col)
         folders = [f for f in folders if f[1] > 0][:5]
