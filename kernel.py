@@ -1091,6 +1091,11 @@ class Row(HoverFrame):
         t = QLabel(title)
         t.setStyleSheet("font-size: 17px;")
         t.setWordWrap(True)
+        # a word-wrapped label shrinks to a narrow column inside a box layout and breaks titles early;
+        # reserve the title's full single-line width (capped, so narrow windows still wrap it)
+        title_font = QFont(t.font())
+        title_font.setPixelSize(17)
+        t.setMinimumWidth(min(QFontMetrics(title_font).horizontalAdvance(title) + 8, 520))
         self.sub = QLabel(subtitle)
         self.sub.setObjectName("muted")
         self.sub.setWordWrap(True)
@@ -6136,10 +6141,19 @@ if __name__ == "__main__":
     family = "Segoe UI Variable Text"
     fdir = os.path.join(base, "fonts")
     if os.path.isdir(fdir):
+        loaded = []
         for fn in sorted(os.listdir(fdir)):
+            if not fn.lower().endswith((".ttf", ".otf")):
+                continue
             fid = QFontDatabase.addApplicationFont(os.path.join(fdir, fn))
-            if fid >= 0 and QFontDatabase.applicationFontFamilies(fid):
-                family = QFontDatabase.applicationFontFamilies(fid)[0]
+            if fid >= 0:
+                loaded += QFontDatabase.applicationFontFamilies(fid)
+        # drop Allo (https://allo.joshpuckett.me, OFL) into the fonts folder and it is used automatically
+        allo = [f for f in loaded if f.lower().startswith("allo") and "oblique" not in f.lower()]
+        if allo:
+            family = allo[0]
+        elif loaded:
+            family = loaded[-1]
     QSS = QSS.replace("'Segoe UI Variable Text'", f"'{family}', 'Segoe UI Variable Text'")
     base_font = QFont(family, 11)
     base_font.setStyleStrategy(QFont.PreferAntialias | QFont.NoSubpixelAntialias)
