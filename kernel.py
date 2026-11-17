@@ -42,7 +42,7 @@ BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
 TITLEBAR_H, CAPTION_W, TITLEBAR_SOFT, SOFT_HOLD, SIDE_FADE = 40, 46 * 3, 2, 0, 56
-TINT = 120  # darkness (0-255) of the title bar blur (frosted glass: lighter than a solid dark bar)
+TINT = 110  # darkness (0-255) of the title bar blur (frosted glass: lighter than a solid dark bar)
 BAND = 2  # rows blended per step when composing the progressive blur
 CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zone, so small scrolls need no re-blur
 ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
@@ -3339,7 +3339,7 @@ class CaptionButton(QAbstractButton):
 class TitleBar(QWidget):
     """Custom title bar. Transparent at rest; once the page under it is scrolled it shows a blurred,
     darkened copy of the content passing beneath it (like a website navbar)."""
-    BLUR_SCALE, BLUR_RADIUS = 3.0, 18.0  # the blur runs at 1/3 size with a gaussian of this radius (bigger = stronger)
+    BLUR_SCALE, BLUR_RADIUS = 4.0, 5.0  # the blur runs at 1/3 size with a gaussian of this radius (bigger = stronger)
 
     # ===== INITIALIZATION: Set up title bar layout and icon =====
     def __init__(self, win):
@@ -3531,7 +3531,7 @@ class TitleBar(QWidget):
             p.drawImage(0, py, soft, 0, sy, w, bh)
             p.setCompositionMode(QPainter.CompositionMode_SourceOver)
             p.setOpacity(1.0)
-            p.fillRect(QRect(0, py, w, bh), QColor(10, 10, 10, tint))
+            p.fillRect(QRect(0, py, w, bh), QColor(17, 17, 17, tint))
         p.end()  # no bottom fade: the frosted bar ends on a clean edge, like macOS / iOS
         return out, dpr
 
