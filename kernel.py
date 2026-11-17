@@ -4134,6 +4134,10 @@ class Kernel(QWidget):
         self.stack.setCurrentIndex(index)
         if hasattr(self, "titlebar"):
             self.titlebar.schedule(instant=True)
+        if index == APPS and time.time() - getattr(self, "info_stamp", 0) > 1800:
+            self.info_stamp = time.time()  # re-check versions/sizes when the page is opened (cache keeps it cheap)
+            for key in list(self.info_rows):
+                self.info_q.put(key)
         if index == GAMING:
             self.refresh_display_status()
         if index == SPECS:
@@ -4210,11 +4214,17 @@ class Kernel(QWidget):
     def info_loop(self):
         while True:
             key = self.info_q.get()
-            try:
-                version, size, url = apps.info(key)
-            except Exception:
-                continue
-            self.info_done.put((key, version, size, url))
+            version, size, url = "", 0, ""
+            for attempt in range(3):  # a failed lookup (network blip) is retried instead of silently dropped
+                try:
+                    version, size, url = apps.info(key)
+                except Exception:
+                    version = ""
+                if version:
+                    break
+                time.sleep(4 * (attempt + 1))
+            if version:
+                self.info_done.put((key, version, size, url))
 
     def on_icon(self, key, img):
         self.icons[key] = img
@@ -5088,6 +5098,7 @@ class Kernel(QWidget):
                 row = ActionRow(name, "", self.app_actions(pkg), self, pkg, domain)
                 self.info_rows[pkg] = row
                 self.info_q.put(pkg)
+                self.info_stamp = time.time()
                 bl.addWidget(row)
                 entries.append((f"{cat} {name} {pkg}".lower(), row))
             page.col.addWidget(box)

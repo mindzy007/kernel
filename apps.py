@@ -183,6 +183,11 @@ def _ok(rc, text):
     return rc == 0 or any(h in text.lower() for h in OK_HINTS)
 
 
+def _clean(v):
+    """YAML values can come quoted ("160.0"); drop the quotes."""
+    return (v or "").strip().strip("\"'")
+
+
 def _version_key(v):
     return [int(x) if x.isdigit() else 0 for x in re.split(r"[.\-+_]", v)]
 
@@ -221,7 +226,7 @@ def _github_manifest(pkg_id):
         return {}
     sha = re.search(r"InstallerSha256:\s*([0-9a-fA-F]{64})", chosen)
     kind = re.search(r"InstallerType:\s*(\S+)", chosen) or top_type
-    return {"url": url.group(1), "version": version.group(1) if version else "",
+    return {"url": _clean(url.group(1)), "version": _clean(version.group(1)) if version else "",
             "sha": sha.group(1) if sha else None, "type": (kind.group(1) if kind else "").lower(),
             "home": None}
 
@@ -239,8 +244,8 @@ def show(pkg_id):
         m = re.search(pattern, text, re.I | re.M)
         return m.group(1) if m else None
     return {
-        "url": grab(r"Installer Url:\s*(\S+)"),
-        "version": grab(r"^Version:\s*(\S+)"),
+        "url": _clean(grab(r"Installer Url:\s*(\S+)")) or None,
+        "version": _clean(grab(r"^Version:\s*(\S+)")) or None,
         "sha": grab(r"Installer SHA256:\s*([0-9a-f]{64})"),
         "type": (grab(r"Installer Type:\s*(\S+)") or "").lower(),
         "home": grab(r"Homepage:\s*(\S+)") or grab(r"Publisher Url:\s*(\S+)"),
@@ -285,8 +290,23 @@ def remote_size(url):
 
 
 INFO_FILE = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "kernel", "info.json")
-INFO_TTL = 12 * 3600
+INFO_TTL = 2 * 3600  # how long a looked-up version/size stays trusted
 _info_lock = threading.Lock()
+_sources_lock = threading.Lock()
+_sources_done = False
+
+
+def refresh_sources():
+    """Once per run, ask winget to update its package index so `winget show` reports the newest versions."""
+    global _sources_done
+    with _sources_lock:
+        if _sources_done or not winget_path():
+            return
+        _sources_done = True
+        try:
+            winget(["source", "update", "--name", "winget"], track=False)
+        except Exception:
+            pass
 
 
 def _info_cache():
@@ -299,16 +319,17 @@ def _info_cache():
 
 def info(pkg_id, refresh=False):
     """(version, size_bytes, source_url) of the installer that Download would fetch.
-    Cached for 12 hours, but an unknown size is retried after a few minutes."""
+    Cached for 2 hours, but an unknown size is retried after a few minutes."""
     with _info_lock:
         hit = _info_cache().get(pkg_id)
     if hit and not refresh and hit.get("url"):
         age = time.time() - hit["t"]
         if age < (INFO_TTL if hit["size"] else 300):
-            return hit["version"], hit["size"], hit["url"]
+            return _clean(hit["version"]), hit["size"], hit["url"]
+    refresh_sources()
     data = show(pkg_id) or show(pkg_id)
-    version = data.get("version") or ""
-    url = data.get("url") or ""
+    version = _clean(data.get("version"))
+    url = _clean(data.get("url"))
     size = remote_size(url) if url else 0
     if size < 100 * 1024:  # redirect/landing pages, not the real installer
         size = 0
