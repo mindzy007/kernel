@@ -91,6 +91,76 @@ GLYPH = {"storage": "\uEDA2", "tweaks": "\uE9E9", "apps": "\uF0E2", "gaming": "\
          "settings": "\uE713"}
 
 
+NAV_ICON_NAMES = {GLYPH[k]: k for k in ("storage", "tweaks", "apps", "gaming", "specs", "activity", "settings")}
+
+
+def draw_nav_icon(p, name, rect, color):
+    """Sidebar icons drawn as vectors on one 24x24 grid: same stroke, round caps, same visual size for all."""
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    side = min(rect.width(), rect.height())
+    p.translate(rect.center().x() - side / 2, rect.center().y() - side / 2)
+    p.scale(side / 24.0, side / 24.0)
+    pen = QPen(color, 1.75)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+
+    def line(x1, y1, x2, y2):
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+    def dot(x, y, r):
+        p.setBrush(color)
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(x, y), r, r)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(pen)
+
+    if name == "tweaks":
+        for y, x in ((6.5, 15.5), (12, 8.5), (17.5, 14)):
+            line(3.5, y, x - 2.9, y)
+            line(x + 2.9, y, 20.5, y)
+            p.drawEllipse(QPointF(x, y), 2.4, 2.4)
+    elif name == "gaming":
+        p.drawRoundedRect(QRectF(2.75, 7, 18.5, 10.5), 5.2, 5.2)
+        line(7.2, 12.2, 10.8, 12.2)
+        line(9, 10.4, 9, 14)
+        dot(15.2, 11.4, 1.05)
+        dot(17.6, 13.3, 1.05)
+    elif name == "apps":
+        for x, y in ((3.75, 3.75), (13.25, 3.75), (3.75, 13.25), (13.25, 13.25)):
+            p.drawRoundedRect(QRectF(x, y, 7, 7), 2, 2)
+    elif name == "storage":
+        p.drawRoundedRect(QRectF(2.75, 8, 18.5, 8.5), 3, 3)
+        line(6.6, 12.25, 10, 12.25)
+        dot(17, 12.25, 1.05)
+    elif name == "specs":
+        p.drawRoundedRect(QRectF(5, 5, 14, 10.5), 2, 2)
+        line(2.75, 19, 21.25, 19)
+    elif name == "activity":
+        path = QPainterPath()
+        path.moveTo(2.75, 12.5)
+        path.lineTo(7, 12.5)
+        path.lineTo(10, 5)
+        path.lineTo(14, 19.5)
+        path.lineTo(17, 12.5)
+        path.lineTo(21.25, 12.5)
+        p.drawPath(path)
+    elif name == "settings":
+        gear = QPainterPath()
+        teeth, r_out, r_in = 8, 9.4, 7.3
+        for i in range(teeth * 4):
+            a = 2 * math.pi * (i - 0.5) / (teeth * 4)
+            r = r_out if i % 4 in (1, 2) else r_in
+            pt = QPointF(12 + r * math.cos(a), 12 + r * math.sin(a))
+            gear.moveTo(pt) if i == 0 else gear.lineTo(pt)
+        gear.closeSubpath()
+        p.drawPath(gear)
+        p.drawEllipse(QPointF(12, 12), 3.2, 3.2)
+    p.restore()
+
+
 def glyph_icon(ch, size=20, on_color=TEXT):
     """Segoe Fluent Icons glyph as a QIcon: muted normally, bright when checked or hovered."""
     icon = QIcon()
@@ -533,10 +603,14 @@ class NavButton(AnimButton):
         t = max(s, h * 0.75)
         c = QColor(int(lerp(122, 255, t)), int(lerp(122, 255, t)), int(lerp(122, 255, t)))
         p.setPen(c)
-        gf = QFont("Segoe Fluent Icons")
-        gf.setPixelSize(20)
-        p.setFont(gf)
-        p.drawText(QRectF(16, 0, 24, self.height()), Qt.AlignCenter, self.glyph)
+        name = NAV_ICON_NAMES.get(self.glyph)
+        if name:
+            draw_nav_icon(p, name, QRectF(18, (self.height() - 21) / 2, 21, 21), c)
+        else:
+            gf = QFont("Segoe Fluent Icons")
+            gf.setPixelSize(20)
+            p.setFont(gf)
+            p.drawText(QRectF(16, 0, 24, self.height()), Qt.AlignCenter, self.glyph)
         p.setFont(self.font())
         p.drawText(QRectF(52, 0, self.width() - 60, self.height()), Qt.AlignVCenter | Qt.AlignLeft,
                    self.text().strip())
