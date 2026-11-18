@@ -5240,6 +5240,7 @@ class Kernel(QWidget):
 
         page.col.addSpacing(26)
         header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 16, 0)  # Copy all lines up with the buttons on other pages
         label = QLabel("Hardware")
         label.setObjectName("section")
         header.addWidget(label)
@@ -5382,7 +5383,7 @@ class Kernel(QWidget):
         for group, items in groups:
             label = page.section(group)
             grid = QGridLayout()
-            grid.setContentsMargins(13, 0, 0, 0)
+            grid.setContentsMargins(13, 0, 16, 0)  # 16px on the right, like the rows on other pages
             grid.setSpacing(10)
             for column in range(3):
                 grid.setColumnStretch(column, 1)
@@ -5399,7 +5400,7 @@ class Kernel(QWidget):
                 page.col.addWidget(self.core_temperature_hint)
                 self.core_temperature_box = QWidget()
                 self.core_temperature_grid = QGridLayout(self.core_temperature_box)
-                self.core_temperature_grid.setContentsMargins(13, 0, 0, 0)
+                self.core_temperature_grid.setContentsMargins(13, 0, 16, 0)
                 self.core_temperature_grid.setSpacing(10)
                 for column in range(3):
                     self.core_temperature_grid.setColumnStretch(column, 1)
