@@ -38,6 +38,7 @@ from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
 FORMSPREE_URL = "https://formspree.io/f/mqpqqlda"  # paste your Formspree form endpoint here
+BUG_DAILY_LIMIT = 3  # reports per install per 24 hours
 BUG_HINT = "Tell me what went wrong. Your message, app version and Windows version are sent."
 SIDEBAR_BG = "#060606"  # a touch darker than BG: the sidebar is told apart by tone, not by a line
 BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
@@ -210,6 +211,7 @@ class Config:
         self.nvidia_displays = {}
         self.legacy_display = None
         self.win_size = None
+        self.bug_times = []  # when bug reports were sent, so the daily limit survives restarts
         self.download_dir = os.path.join(os.path.expanduser("~"), "Downloads", "kernel")
         self.load(self.path)
 
@@ -243,6 +245,8 @@ class Config:
                 for k, v in d["nvidia_displays"].items()
                 if isinstance(k, str) and isinstance(v, dict)
                 and gamma_ok(v.get("gamma")) and contrast_ok(v.get("contrast"))}
+        if isinstance(d.get("bug_times"), list):
+            self.bug_times = [float(t) for t in d["bug_times"] if isinstance(t, (int, float))][-20:]
         ws = d.get("window")
         if isinstance(ws, list) and len(ws) == 2 and all(isinstance(x, int) for x in ws):
             self.win_size = ws
@@ -260,6 +264,7 @@ class Config:
                            "accent": self.accent,
                            "caption_style": self.caption_style,
                            "nvidia_displays": self.nvidia_displays,
+                           "bug_times": self.bug_times,
                            "window": self.win_size}, f, indent=2)
             return True
         except OSError:
@@ -5708,7 +5713,12 @@ class Kernel(QWidget):
             f"color: {TEXT}; padding: 12px 15px; border-radius: 14px; }}")
         self.bug_text.setPlaceholderText("What happened? What did you expect to happen?")
         self.bug_text.setFixedHeight(120)
-        page.add(self.bug_text)
+        bug_wrap = QWidget()  # inset 16px each side so the box lines up with the text and button of the row above
+        bug_lay = QHBoxLayout(bug_wrap)
+        bug_lay.setContentsMargins(16, 0, 16, 0)
+        bug_lay.addWidget(self.bug_text)
+        page.col.addSpacing(12)  # room so the row's hover highlight never touches the box
+        page.add(bug_wrap)
         self.bug_sent.connect(self.show_bug_result)
         page.section("About")
         self.update_url = self.update_tag = self.update_file = ""
@@ -5741,8 +5751,15 @@ class Kernel(QWidget):
         if len(text) < 5:
             self.set_bug_status("Write a few words about the problem first.", "#e5a64a", 5000)
             return
-        if time.time() - getattr(self, "bug_last", 0) < 30:
-            self.set_bug_status("Please wait a moment before sending another report.", "#e5a64a", 5000)
+        now = time.time()
+        if now - getattr(self, "bug_last", 0) < 60:
+            self.set_bug_status("Please wait a minute before sending another report.", "#e5a64a", 5000)
+            return
+        if len([t for t in self.cfg.bug_times if now - t < 86400]) >= BUG_DAILY_LIMIT:
+            self.set_bug_status(f"Daily limit reached ({BUG_DAILY_LIMIT} reports). Try again tomorrow.", "#e5a64a", 6000)
+            return
+        if text == getattr(self, "bug_last_text", ""):
+            self.set_bug_status("That report was already sent.", "#e5a64a", 5000)
             return
         import platform
         payload = {"_subject": f"Kernel bug report (v{VERSION})", "message": text[:4000],
@@ -5767,6 +5784,9 @@ class Kernel(QWidget):
         self.bug_send.setEnabled(True)
         if ok:
             self.bug_last = time.time()
+            self.bug_last_text = self.bug_text.toPlainText().strip()
+            self.cfg.bug_times = (self.cfg.bug_times + [self.bug_last])[-20:]
+            self.cfg.save()
             self.bug_text.clear()
             self.set_bug_status("Sent. Thank you!", "#6ccf6c", 6000)
         else:
