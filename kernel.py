@@ -1066,7 +1066,7 @@ class PillLabel(QWidget):
         f.setWeight(QFont.Normal)
         self.setFont(f)
         fm = QFontMetrics(f)
-        self.setFixedSize(fm.horizontalAdvance(text) + 22, fm.height() + 6)
+        self.setFixedSize(fm.horizontalAdvance(text) + 22, fm.height() + 4)
         self.setAttribute(Qt.WA_TranslucentBackground)
 
     def paintEvent(self, _):
@@ -1154,6 +1154,12 @@ class PathChip(QWidget):
 
 
 class Row(HoverFrame):
+    def add_badge(self, badge):
+        """Put a badge after the title without letting it make the title line taller than a plain row's."""
+        badge.setFixedHeight(min(badge.height(), self.title_label.sizeHint().height()))
+        self.title_label.setMaximumWidth(self.title_adv + 3)  # hug the title text: the gap is then just the spacing
+        self.title_row.insertWidget(1, badge, 0, Qt.AlignVCenter)
+
     def __init__(self, title, subtitle="", icon=None, right_margin=16):
         super().__init__()
         self.setObjectName("row")
@@ -1165,7 +1171,7 @@ class Row(HoverFrame):
         text_box = QWidget()
         text = QVBoxLayout(text_box)
         text.setContentsMargins(0, 0, ROW_TEXT_GAP, 0)
-        text.setSpacing(2)
+        text.setSpacing(3)
         self.title = title
         t = QLabel(title)
         t.setStyleSheet("font-size: 17px;")
@@ -1174,7 +1180,9 @@ class Row(HoverFrame):
         # reserve the title's full single-line width (capped, so narrow windows still wrap it)
         title_font = QFont(t.font())
         title_font.setPixelSize(17)
-        t.setMinimumWidth(min(QFontMetrics(title_font).horizontalAdvance(title) + 8, 520))
+        self.title_adv = QFontMetrics(title_font).horizontalAdvance(title)
+        t.setMinimumWidth(min(self.title_adv + 2, 520))
+        self.title_label = t
         self.sub = QLabel(subtitle)
         self.sub.setObjectName("muted")
         self.sub.setWordWrap(True)
@@ -1936,8 +1944,7 @@ class TaskRow(Row):
             self.reversible = False
             self.right.addWidget(self.revert)
         if not self.reversible and self.apply is not None:
-            warn = PillLabel("Cannot be reverted")
-            self.title_row.insertWidget(1, warn)
+            self.add_badge(PillLabel("Cannot be reverted"))
             self.sub.setText(self.sub.text().replace(" This cannot be reverted.", "").replace("This cannot be reverted.", "").strip())
         self.toggle = None
         if on_apply is None:  # a row without an Apply button (Settings) is controlled by its switch
@@ -1959,7 +1966,7 @@ class RunRow(Row):
         super().__init__(title, subtitle)
         self.sub.setWordWrap(True)
         if warn:
-            self.title_row.insertWidget(1, PillLabel("Cannot be reverted"))
+            self.add_badge(PillLabel("Cannot be reverted"))
         self.b = Button("Run")
         self.b.setCursor(Qt.PointingHandCursor)
         self.b.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
@@ -3309,18 +3316,22 @@ class FluentCombo(QComboBox):
         shown = QFontMetrics(tf).elidedText(self.currentText(), Qt.ElideRight, max(0, self.width() - 18 - 34))
         p.drawText(QRectF(18, 0, max(0, self.width() - 18 - 34), self.height()), Qt.AlignVCenter | Qt.AlignLeft, shown)
         p.setOpacity(1.0)
-        f = QFont("Segoe Fluent Icons")
-        f.setPixelSize(12)
-        p.setFont(f)
+        # the arrow is drawn as a path around its exact middle: a font glyph's visual centre is off from its
+        # box, which made it wobble while it turned
         arrow_alpha = int(122 + (200 - 122) * h)
-        p.setPen(QColor(arrow_alpha, arrow_alpha, arrow_alpha))
-        box = self.rect().adjusted(0, 0, -14, 0)
-        glyph_w = QFontMetricsF(f).horizontalAdvance("\uE70D")
-        centre = QPointF(box.right() + 1 - glyph_w / 2, box.center().y() + 0.5)
-        p.translate(centre)
-        p.rotate(180.0 * self._caret)  # flips over around its own centre as the list opens and closes
-        p.translate(-centre)
-        p.drawText(box, Qt.AlignRight | Qt.AlignVCenter, "\uE70D")
+        pen = QPen(QColor(arrow_alpha, arrow_alpha, arrow_alpha), 1.6)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.translate(QPointF(self.width() - 14 - 6, self.height() / 2.0))
+        p.rotate(180.0 * self._caret)
+        chevron = QPainterPath()
+        chevron.moveTo(-4.0, -2.0)
+        chevron.lineTo(0.0, 2.0)
+        chevron.lineTo(4.0, -2.0)
+        p.drawPath(chevron)
 
 
 class NCCALCSIZE_PARAMS(ctypes.Structure):
