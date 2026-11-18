@@ -38,7 +38,7 @@ from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
 FORMSPREE_URL = "https://formspree.io/f/mqpqqlda"  # paste your Formspree form endpoint here
-BUG_DAILY_LIMIT = 3  # reports per install per 24 hours
+BUG_DAILY_LIMIT = 2  # reports per install per 24 hours
 BUG_HINT = "Tell me what went wrong. Your message, app version and Windows version are sent."
 SIDEBAR_BG = "#060606"  # a touch darker than BG: the sidebar is told apart by tone, not by a line
 BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
@@ -2075,7 +2075,7 @@ class JobRow(HoverFrame):
         lay.addLayout(col, 1)
         self.btn = Button("", "ghost")
         self.btn.setCursor(Qt.PointingHandCursor)
-        self.btn.setMinimumWidth(84)
+        self.btn.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.btn.clicked.connect(self.click)
         lay.addWidget(self.btn)
         job.changed.connect(self.refresh)
@@ -4047,7 +4047,7 @@ class Kernel(QWidget):
         inner.setObjectName("dlinner")
         inner.setStyleSheet("#dlinner { background: transparent; }")
         self.dl_list = QVBoxLayout(inner)
-        self.dl_list.setContentsMargins(0, 0, 0, 0)
+        self.dl_list.setContentsMargins(0, 0, 14, 0)  # keep rows (and their hover) clear of the scroll bar strip
         self.dl_list.setSpacing(2)
         self.dl_list.addStretch()
         scroll.setWidget(inner)
