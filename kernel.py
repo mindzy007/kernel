@@ -40,7 +40,7 @@ from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 FORMSPREE_URL = "https://formspree.io/f/mqpqqlda"  # paste your Formspree form endpoint here
 BUG_DAILY_LIMIT = 2  # reports per install per 24 hours
 BUG_HINT = "Tell me what went wrong. Your message, app version and Windows version are sent."
-SIDEBAR_BG = "#060606"  # a touch darker than BG: the sidebar is told apart by tone, not by a line
+SIDEBAR_BG = "#070707"  # a touch darker than BG: the sidebar is told apart by tone, not by a line
 BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
 CUSTOM_TITLEBAR = True  # False = back to the normal Windows title bar
