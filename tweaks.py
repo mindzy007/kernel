@@ -447,12 +447,36 @@ def t_sounds(log):
     log(f"Sound scheme set to 'No Sounds' ({n} events cleared) and startup sound disabled.")
 
 
+STICKY_OFF = 58
+STICKY_MASK = 0x4 | 0x20 | 0x40 | 0x80 | 0x100  # shortcut, taskbar icon, sound, lock, two-keys-off
+STICKY_ICON = 0x20  # the taskbar icon stays on
+
+
+def _flags(path):
+    try:
+        return int(_reg(HKCU, path, "Flags"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _sticky_all_off():
+    """True only when Sticky, Toggle and Filter keys are all disabled the way t_sticky_keys sets them."""
+    base = r"Control Panel\Accessibility"
+    sticky, toggle, filt = _flags(base + r"\StickyKeys"), _flags(base + r"\ToggleKeys"), _flags(base + r"\Keyboard Response")
+    if None in (sticky, toggle, filt):
+        return False
+    return ((sticky & STICKY_MASK) == STICKY_ICON and not sticky & 0x1
+            and not toggle & 0x5 and not filt & 0x5)
+
+
 def t_sticky_keys(log):
     key = r"Control Panel\Accessibility"
-    set_str(HKCU, key + r"\StickyKeys", "Flags", "506")
+    # Sticky keys flags 58 = the Settings page with everything off except the taskbar icon:
+    # shortcut off, lock-on-double-press off, turn-off-on-two-keys off, sound off, icon on
+    set_str(HKCU, key + r"\StickyKeys", "Flags", str(STICKY_OFF))
     set_str(HKCU, key + r"\ToggleKeys", "Flags", "58")
     set_str(HKCU, key + r"\Keyboard Response", "Flags", "122")
-    sk = (ctypes.c_uint * 2)(8, 506)
+    sk = (ctypes.c_uint * 2)(8, STICKY_OFF)
     ctypes.windll.user32.SystemParametersInfoW(0x003B, 8, sk, 3)
     log("Sticky/Toggle/Filter Keys shortcut prompts disabled.")
 
@@ -643,7 +667,7 @@ ACTIVE_CHECKS = {
     "t_nvidia_profile": lambda: os.path.isfile(NVIDIA_MARKER),
     "t_mouse_accel": lambda: _all_reg(HKCU, r"Control Panel\Mouse",
                                        ("MouseSpeed", "MouseThreshold1", "MouseThreshold2"), "0"),
-    "t_sticky_keys": lambda: _reg(HKCU, r"Control Panel\Accessibility\StickyKeys", "Flags") == "506",
+    "t_sticky_keys": _sticky_all_off,
     "t_hags": lambda: _reg(HKLM, HAGS_KEY, "HwSchMode") == 2,
     "t_game_mode": lambda: _all_reg(HKCU, r"Software\Microsoft\GameBar",
                                      ("AutoGameModeEnabled", "AllowAutoGameMode"), 1),
