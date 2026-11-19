@@ -10,7 +10,7 @@
 
 [![Download](https://img.shields.io/github/v/release/mindzy007/kernel?style=for-the-badge&label=Download&logo=windows11&logoColor=white&color=2b2b2b)](https://github.com/mindzy007/kernel/releases/latest)
 &nbsp;
-[![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/mindzy)
+[![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-7c3aed?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/mindzy)
 &nbsp;
 [![Report a bug](https://img.shields.io/badge/Report-a%20bug-2b2b2b?style=for-the-badge&logo=github&logoColor=white)](https://github.com/mindzy007/kernel/issues/new)
 &nbsp;
@@ -77,7 +77,7 @@ Privacy, appearance and input changes, each applied (and reverted) with a single
 
 ## Requirements
 
-| | |
+| Requirement | Details |
 | --- | --- |
 | **OS** | Windows 11 (64-bit). Some tweaks need a recent build, such as 22H2 or newer |
 | **Permissions** | Administrator rights (Kernel asks on launch) |
@@ -130,7 +130,7 @@ Open an [issue](https://github.com/mindzy007/kernel/issues/new), or use **Settin
 
 Kernel is free. If you would like to support it, you can do so on Ko-fi. It is entirely optional and always appreciated.
 
-[![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/mindzy)
+[![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-7c3aed?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/mindzy)
 
 <br>
 
@@ -138,7 +138,7 @@ Kernel is free. If you would like to support it, you can do so on Ko-fi. It is e
 
 - [LibreHardwareMonitor](https://github.com/LibreHardwareMonitor/LibreHardwareMonitor) (MPL-2.0) powers the hardware readings
 - [PawnIO](https://pawnio.eu) provides the low-level driver for sensor access
-- [Allo](https://github.com/joshpuckett/allo) by Josh Puckett is the app font (SIL Open Font License)
+- [Allo](https://github.com/joshpuckett/allo) by Josh Puckett is the app font (SIL Open Font License, the full text is in [`fonts/OFL.txt`](fonts/OFL.txt))
 - Built with Python and [Qt for Python (PySide6)](https://doc.qt.io/qtforpython-6/)
 
 Third-party license notices are included in the `monitor-helper` folder.
