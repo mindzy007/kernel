@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import ssl
+import struct
 import subprocess
 import tempfile
 import threading
@@ -564,28 +565,71 @@ def _get(url, timeout=12, limit=2_000_000):
         return None, ""
 
 
+def _image_px(data):
+    """Largest side in pixels of a PNG / ICO / GIF / JPEG, read from the header (0 if unknown)."""
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return max(struct.unpack(">II", data[16:24]))
+        if data[:4] == b"\x00\x00\x01\x00":
+            count = struct.unpack("<H", data[4:6])[0]
+            return max((data[6 + 16 * i] or 256) for i in range(count))
+        if data[:3] == b"GIF":
+            return max(struct.unpack("<HH", data[6:10]))
+        if data[:2] == b"\xff\xd8":
+            i = 2
+            while i + 9 < len(data):
+                if data[i] != 0xFF:
+                    i += 1
+                    continue
+                marker = data[i + 1]
+                if marker in (0xC0, 0xC1, 0xC2):
+                    h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                    return max(h, w)
+                i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+    except Exception:
+        pass
+    return 0
+
+
 def _site_icons(domain):
-    """Icon URLs declared by the site's own homepage, best candidates first."""
+    """Icon URLs the site offers (page links, web app manifest, apple-touch defaults), biggest first."""
     from urllib.parse import urljoin
-    data, _ = _get(f"https://{domain}/", limit=400_000)
-    if not data:
-        return []
-    html = data.decode("utf-8", "replace")
-    found = []
+    base = f"https://{domain}/"
+    data, _ = _get(base, limit=400_000)
+    html = data.decode("utf-8", "replace") if data else ""
+    found = {}
+
+    def add(url, score):
+        found[url] = max(score, found.get(url, 0))
+
+    manifest = None
     for tag in re.findall(r"<link\b[^>]*>", html, re.I):
         rel = re.search(r'rel=["\']([^"\']+)["\']', tag, re.I)
         href = re.search(r'href=["\']([^"\']+)["\']', tag, re.I)
-        if not rel or not href or "icon" not in rel.group(1).lower():
+        if not rel or not href:
             continue
-        h = href.group(1)
-        if h.lower().split("?")[0].endswith(".svg"):
+        kind = rel.group(1).lower()
+        if "manifest" in kind:
+            manifest = urljoin(base, href.group(1))
+            continue
+        if "icon" not in kind or href.group(1).lower().split("?")[0].endswith(".svg"):
             continue
         sz = re.search(r'sizes=["\'](\d+)x', tag, re.I)
-        score = int(sz.group(1)) if sz else 0
-        if "apple-touch" in rel.group(1).lower():
-            score += 1000
-        found.append((score, urljoin(f"https://{domain}/", h)))
-    return [u for _, u in sorted(found, key=lambda x: -x[0])]
+        add(urljoin(base, href.group(1)), (int(sz.group(1)) if sz else 0) + (1000 if "apple-touch" in kind else 0))
+    if manifest:  # installable-web-app icons are usually 192px or 512px
+        mdata, _ = _get(manifest, limit=200_000)
+        try:
+            for icon in json.loads(mdata.decode("utf-8", "replace")).get("icons", []):
+                src = icon.get("src", "")
+                if src.lower().split("?")[0].endswith(".svg"):
+                    continue
+                biggest = max([int(n) for n in re.findall(r"(\d+)x\d+", icon.get("sizes", ""))] or [0])
+                add(urljoin(manifest, src), biggest + 1500)
+        except Exception:
+            pass
+    add(urljoin(base, "/apple-touch-icon.png"), 1000)
+    add(urljoin(base, "/apple-touch-icon-precomposed.png"), 900)
+    return [u for u, _ in sorted(found.items(), key=lambda x: -x[1])]
 
 
 def _valid_image(data, ctype):
@@ -596,7 +640,7 @@ def _valid_image(data, ctype):
 def icon_bytes(key, domain=None, google_only=False):
     """Official icon for an app, cached on disk: the site's own icon first, then Google's favicon cache."""
     os.makedirs(ICON_DIR, exist_ok=True)
-    path = os.path.join(ICON_DIR, re.sub(r"[^\w.+-]", "_", key) + ".v3.img")
+    path = os.path.join(ICON_DIR, re.sub(r"[^\w.+-]", "_", key) + ".v4.img")
     if google_only and os.path.exists(path):
         os.remove(path)
     if os.path.exists(path):
@@ -610,16 +654,20 @@ def icon_bytes(key, domain=None, google_only=False):
         domain = guess
     if not domain:
         return None
-    data = None
-    for url in ([] if google_only else _site_icons(domain)[:3]):
+    data, best = None, 0
+    for url in ([] if google_only else _site_icons(domain)[:6]):
         d, ct = _get(url)
         if _valid_image(d, ct):
-            data = d
-            break
-    if not data:
+            px = _image_px(d)
+            if px > best:  # keep the sharpest one, not just the first that loads
+                data, best = d, px
+            if best >= 128:
+                break
+    if best < 96:  # nothing sharp on the site itself: ask Google's favicon cache for its biggest copy
         d, _ = _get("https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL"
-                    f"&url=https://{domain}&size=128")
-        data = d if d and len(d) > 120 else None
+                    f"&url=https://{domain}&size=256")
+        if d and len(d) > 120 and _image_px(d) > best:
+            data = d
     if not data:
         return None
     with open(path, "wb") as f:

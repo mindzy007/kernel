@@ -14,7 +14,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 from PySide6.QtCore import (
     Property, QEasingCurve, QEvent, QObject, QParallelAnimationGroup, QPoint, QPointF, QVariantAnimation,
-    QPropertyAnimation, QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize,
+    QPropertyAnimation, QRect, QRectF, Qt, QTimer, QUrl, Signal, QSize, QSizeF,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QFontMetricsF, QIcon, QTransform, QImage, QLinearGradient,
@@ -673,7 +673,14 @@ class AppIcon(QWidget):
         self.setFixedSize(size, size)
 
     def set_image(self, img):
+        # shrink big logos in one smooth step to the exact pixel size they are drawn at (screen scale included);
+        # letting the painter squash a 256px icon into 20px in one go is what made them look rough
+        dpr = self.devicePixelRatioF()
+        side = max(1, round((self.width() - 12) * dpr))
+        if max(img.width(), img.height()) > side:
+            img = img.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.img = QPixmap.fromImage(img)
+        self.img.setDevicePixelRatio(dpr)
         self.update()
 
     def paintEvent(self, _):
@@ -682,19 +689,24 @@ class AppIcon(QWidget):
         r = QRectF(self.rect())
         path = QPainterPath()
         path.addRoundedRect(r, 9, 9)
+        # every icon sits on the same macOS-style tile: one soft grey gradient with a faint top light
+        grad = QLinearGradient(0, r.top(), 0, r.bottom())
+        grad.setColorAt(0.0, QColor(96, 96, 100))
+        grad.setColorAt(1.0, QColor(58, 58, 62))
+        p.fillPath(path, QBrush(grad))
+        p.setPen(QPen(QColor(255, 255, 255, 38), 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 8.5, 8.5)
         if self.img:
-            p.fillPath(path, QColor("#141414"))
             p.setClipPath(path)
-            p.drawPixmap(r.adjusted(5, 5, -5, -5), self.img, QRectF(self.img.rect()))
+            target = r.adjusted(6, 6, -6, -6)
+            logical = QSizeF(self.img.size()) / self.img.devicePixelRatio()
+            logical.scale(target.size(), Qt.KeepAspectRatio)
+            p.drawPixmap(QRectF(QPointF(target.center().x() - logical.width() / 2,
+                                        target.center().y() - logical.height() / 2), logical),
+                         self.img, QRectF(self.img.rect()))
         else:
-            # no logo: a macOS-style tile, one soft grey gradient for every app, with a single white letter
-            grad = QLinearGradient(0, r.top(), 0, r.bottom())
-            grad.setColorAt(0.0, QColor(96, 96, 100))
-            grad.setColorAt(1.0, QColor(58, 58, 62))
-            p.fillPath(path, QBrush(grad))
-            p.setPen(QPen(QColor(255, 255, 255, 38), 1))  # faint top light, like a glass tile
-            p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 8.5, 8.5)
+            # no logo: a single white letter on the tile
             p.setPen(QColor(255, 255, 255, 235))
             f = p.font()
             f.setWeight(QFont.DemiBold)
