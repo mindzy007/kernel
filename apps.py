@@ -40,6 +40,10 @@ def _open(req, timeout=30):
 # Apps with no winget package: a stable publisher link that redirects to the current installer
 DIRECT = {"UniversalAudio.UAConnect": "https://www.uaudio.com/apps/uaconnect/win/installer"}
 
+# Apps published only as GitHub releases: id -> (owner/repo, regex for the installer asset's file name)
+GITHUB = {"krisgfx9.WirelessBattery": ("krisgfx9/Wireless-Device-Battery-Monitor",
+                                       r"^WirelessBattery-Setup-.*\.exe$")}
+
 # (category, display name, winget id, website used for the icon)
 CATALOG = [
     ("Browsers", "Google Chrome", "Google.Chrome", "chrome.google.com"),
@@ -96,6 +100,7 @@ CATALOG = [
     ("Utilities", "IObit Unlocker", "IObit.IObitUnlocker", "iobit.com"),
     ("Utilities", "MacType", "MacType.MacType", "github.com"),
     ("Utilities", "ParkControl", "BitSum.ParkControl", "bitsum.com"),
+    ("Utilities", "Wireless Battery", "krisgfx9.WirelessBattery", "github.com"),
     ("Utilities", "Cloudflare WARP", "Cloudflare.Warp", "cloudflare.com"),
     ("Utilities", "Malwarebytes", "Malwarebytes.Malwarebytes", "malwarebytes.com"),
     ("Developer", "Git", "Git.Git", "git-scm.com"),
@@ -231,10 +236,35 @@ def _github_manifest(pkg_id):
             "home": None}
 
 
+def _github_release(repo, pattern):
+    """Newest release's installer straight from GitHub: URL, version (tag) and SHA256 when GitHub lists one.
+    Looks at the newest releases (pre-releases included) and takes the first with a matching installer."""
+    try:
+        req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases?per_page=10",
+                                     headers={"User-Agent": "kernel/1.0", "Accept": "application/vnd.github+json"})
+        with _open(req, timeout=20) as r:
+            releases = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return {}
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        asset = next((a for a in rel.get("assets", []) if re.search(pattern, a.get("name", ""), re.I)), None)
+        if not asset:
+            continue
+        digest = asset.get("digest") or ""
+        sha = digest.split(":", 1)[1] if digest.lower().startswith("sha256:") else None
+        return {"url": asset["browser_download_url"], "version": _clean(rel.get("tag_name", "")).lstrip("vV"),
+                "sha": sha, "type": "inno", "home": f"https://github.com/{repo}"}
+    return {}
+
+
 def show(pkg_id):
     """Read the publisher installer URL / hash / homepage from the winget manifest."""
     if pkg_id in DIRECT:
         return _direct(DIRECT[pkg_id])
+    if pkg_id in GITHUB:
+        return _github_release(*GITHUB[pkg_id])
     rc, text = winget(["show", "--id", pkg_id, "-e", "--source", "winget",
                        "--accept-source-agreements"]) if winget_path() else (1, "")
     if rc != 0:
@@ -415,7 +445,31 @@ def download(pkg_id, dest, job):
     return False
 
 
+def install_github(pkg_id, job):
+    """Download the release installer (hash-checked when GitHub gives one) and run it silently (Inno Setup)."""
+    job.update(progress=-1, message="Looking up latest release…")
+    info = show(pkg_id)
+    if not info.get("url"):
+        job.fail_msg = "Could not reach GitHub"
+        return False
+    dest = os.path.join(tempfile.gettempdir(), "kernel-installers")
+    job.log(f"Downloading {pkg_id} {info.get('version', '')} from github.com")
+    if not fetch_file(info["url"], dest, info.get("sha"), "exe", job):
+        return False
+    job.update(progress=-1, message="Installing…")
+    try:
+        rc = subprocess.run([job.path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"],
+                            creationflags=NOWIN).returncode
+    except OSError as e:
+        job.fail_msg = f"Could not run the installer ({e.strerror})"
+        return False
+    job.done_msg, job.fail_msg = "Installed", f"Failed (exit {rc})"
+    return rc == 0
+
+
 def install(pkg_id, job):
+    if pkg_id in GITHUB:
+        return install_github(pkg_id, job)
     if pkg_id in DIRECT:
         return install_direct(pkg_id, job)
     job.update(progress=-1, message="Starting…")
