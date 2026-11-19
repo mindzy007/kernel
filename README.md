@@ -8,8 +8,6 @@
 
 <br>
 
-[![Download](https://img.shields.io/github/v/release/mindzy007/kernel?style=for-the-badge&label=Download&logo=windows11&logoColor=white&color=2b2b2b)](https://github.com/mindzy007/kernel/releases/latest)
-&nbsp;
 [![Support on Ko-fi](https://img.shields.io/badge/Support%20on-Ko--fi-7c3aed?style=for-the-badge&logo=kofi&logoColor=white)](https://ko-fi.com/mindzy)
 &nbsp;
 [![Report a bug](https://img.shields.io/badge/Report-a%20bug-2b2b2b?style=for-the-badge&logo=github&logoColor=white)](https://github.com/mindzy007/kernel/issues/new)
