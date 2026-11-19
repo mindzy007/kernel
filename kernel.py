@@ -39,8 +39,8 @@ from jobs import ACTIVE, Job, JobManager
 from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
 
 ISSUES_URL = f"https://github.com/{UPDATE_REPO}/issues/new"  # bug reports open a pre-filled GitHub issue
-DONATE_URL = ""  # optional donations: paste your Ko-fi / GitHub Sponsors / Buy Me a Coffee link; empty hides the row
-BUG_HINT = "Opens a pre-filled GitHub issue in your browser (a free GitHub account is needed to submit)."
+DONATE_URL = "https://ko-fi.com/mindzy"
+BUG_HINT = "A free GitHub account is needed to submit."
 SIDEBAR_BG = "#070707"  # a touch darker than BG: the sidebar is told apart by tone, not by a line
 BG, BORDER, TEXT, MUTED = "#0a0a0a", "#1a1a1a", "#ffffff", "#7a7a7a"
 ROW_ACTION_BUTTON_WIDTH = 96
@@ -5743,7 +5743,7 @@ class Kernel(QWidget):
         self.bug_text.setStyleSheet(  # app font (not the log's monospace), text inset to line up with the row text above
             f"QPlainTextEdit#bugText {{ font-family: '{QApplication.font().family()}'; font-size: 15px; "
             f"color: {TEXT}; padding: 12px 15px; border-radius: 14px; }}")
-        self.bug_text.setPlaceholderText("What happened? What did you expect to happen?")
+        self.bug_text.setPlaceholderText("What happened?")
         self.bug_text.setFixedHeight(120)
         bug_wrap = QWidget()  # inset 16px each side so the box lines up with the text and button of the row above
         bug_lay = QHBoxLayout(bug_wrap)
@@ -5762,16 +5762,14 @@ class Kernel(QWidget):
         self.update_button = Button("Check for updates")
         self.update_button.clicked.connect(self.check_for_updates)
         self.about_row.right.addWidget(self.update_download)
+        if DONATE_URL:  # donating lives next to the update check: one tidy About row
+            self.donate_button = Button("Donate")
+            self.donate_button.setToolTip("100% optional. Kernel is free and always will be; donations help keep it going.")
+            self.donate_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(DONATE_URL)))
+            self.about_row.right.addWidget(self.donate_button)
         self.about_row.right.addWidget(self.update_button)
         self.update_checked.connect(self.show_update_result)
         page.add(self.about_row)
-        if DONATE_URL:
-            page.section("Support")
-            donate_row = Row("Support Kernel", "Optional. Kernel is free and always will be; donations help keep it going.")
-            donate_button = Button("Donate")
-            donate_button.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(DONATE_URL)))
-            donate_row.right.addWidget(donate_button)
-            page.add(donate_row)
         page.col.addStretch()
         return page
 
