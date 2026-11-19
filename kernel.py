@@ -682,17 +682,25 @@ class AppIcon(QWidget):
         r = QRectF(self.rect())
         path = QPainterPath()
         path.addRoundedRect(r, 9, 9)
-        p.fillPath(path, QColor("#141414"))
         if self.img:
+            p.fillPath(path, QColor("#141414"))
             p.setClipPath(path)
             p.drawPixmap(r.adjusted(5, 5, -5, -5), self.img, QRectF(self.img.rect()))
         else:
-            p.setPen(QColor("#8a8a8a"))
+            # no logo: a macOS-style tile, one soft grey gradient for every app, with a single white letter
+            grad = QLinearGradient(0, r.top(), 0, r.bottom())
+            grad.setColorAt(0.0, QColor(96, 96, 100))
+            grad.setColorAt(1.0, QColor(58, 58, 62))
+            p.fillPath(path, QBrush(grad))
+            p.setPen(QPen(QColor(255, 255, 255, 38), 1))  # faint top light, like a glass tile
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 8.5, 8.5)
+            p.setPen(QColor(255, 255, 255, 235))
             f = p.font()
-            f.setWeight(QFont.Medium)
-            f.setPixelSize(14)
+            f.setWeight(QFont.DemiBold)
+            f.setPixelSize(16)
             p.setFont(f)
-            p.drawText(r, Qt.AlignCenter, self.name[:1].upper())
+            p.drawText(r.adjusted(0, -1, 0, -1), Qt.AlignCenter, self.name[:1].upper())
 
 
 class Bar(QWidget):
@@ -4300,7 +4308,7 @@ class Kernel(QWidget):
         self.icon_widgets.setdefault(key, []).append(w)
         if key in self.icons:
             w.set_image(self.icons[key])
-        elif key not in self.icon_pending:
+        elif key not in self.icon_pending and domain != "github.com":
             self.icon_pending.add(key)
             self.icon_q.put((key, domain))
         return w
