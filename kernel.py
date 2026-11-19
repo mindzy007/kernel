@@ -5226,7 +5226,7 @@ class Kernel(QWidget):
             bl.addWidget(s)
             bl.addSpacing(6)
             entries = []
-            for _, name, pkg, domain in (c for c in apps.CATALOG if c[0] == cat):
+            for _, name, pkg, domain in sorted((c for c in apps.CATALOG if c[0] == cat), key=lambda c: c[1].lower()):
                 row = ActionRow(name, "", self.app_actions(pkg), self, pkg, domain)
                 self.info_rows[pkg] = row
                 self.info_q.put(pkg)
