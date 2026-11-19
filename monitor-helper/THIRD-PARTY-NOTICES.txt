@@ -1,0 +1,8 @@
+kernel bundles LibreHardwareMonitorLib 0.9.6, source commit
+3d331e3370efb858411f19511373eff65a218701.
+The library is licensed under the Mozilla Public License 2.0; its license is in MPL-2.0.txt.
+The upstream third-party notices are in LIBREHARDWAREMONITOR-THIRD-PARTY-NOTICES.txt.
+Source: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor
+
+The sensor helper is published self-contained and includes the .NET 8 runtime.
+The .NET runtime is licensed under MIT; notices: https://github.com/dotnet/runtime

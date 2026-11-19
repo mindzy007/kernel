@@ -1,0 +1,11 @@
+# bundled Python install and build output: never commit these
+Python/
+build/
+dist/
+installer/
+monitor-helper/bin/
+monitor-helper/obj/
+monitor-helper/out/
+__pycache__/
+*.pyc
+private.py
