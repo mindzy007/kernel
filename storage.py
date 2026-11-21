@@ -6,6 +6,7 @@ import re
 import shutil
 import string
 import subprocess
+import sys
 import threading
 import time
 import winreg
@@ -129,7 +130,28 @@ _POOL_LOCK = threading.Lock()
 CPUS = os.cpu_count() or 4
 KEEP_DEPTH = 4  # folders up to this many levels under a drive root keep their own size (deeper ones count into them)
 _SLOTS = threading.BoundedSemaphore(3)  # most folder tasks running at once, over every drive: more starves the UI of the GIL
-BUSY, REST = 0.004, 0.002  # a scan thread works at most BUSY seconds, then sleeps REST so the UI thread gets the GIL
+BUSY, REST = 0.002, 0.002  # a scan thread works at most BUSY seconds, then sleeps REST so the UI thread gets the GIL
+_SWITCH = [0, 0.005]
+_SWITCH_LOCK = threading.Lock()
+
+
+class _responsive:
+    """While scans run, make Python hand the GIL to a waiting UI thread after 0.5 ms instead of 5 ms.
+    With busy scan threads that wait is what made scrolling stutter."""
+
+    def __enter__(self):
+        with _SWITCH_LOCK:
+            if not _SWITCH[0]:
+                _SWITCH[1] = sys.getswitchinterval()
+                sys.setswitchinterval(0.0005)
+            _SWITCH[0] += 1
+
+    def __exit__(self, *exc):
+        with _SWITCH_LOCK:
+            _SWITCH[0] -= 1
+            if not _SWITCH[0]:
+                sys.setswitchinterval(_SWITCH[1])
+
 _MOUNT_POINT_TAG = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT: junctions and folders a volume is mounted on
 
 
@@ -258,10 +280,11 @@ class DriveTree:
         self._nodes.append(top)
         self._push(root, 0, top)
         threads = [threading.Thread(target=self._worker, daemon=True) for _ in range(max(1, workers or workers_for(root)))]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        with _responsive():
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
         for n in reversed(self._nodes):  # a child always comes after its parent in the list
             if n.parent is not None:
                 n.parent.total += n.total
@@ -662,8 +685,9 @@ def _known_size(it, tree):
 def _sizes(items, tree=None):
     sizes = [_known_size(it, tree) for it in items]
     todo = [i for i, sz in enumerate(sizes) if sz is None]
-    for i, sz in zip(todo, _pool().map(lambda n: size_of(items[n]["location"]), todo)):
-        sizes[i] = sz
+    with _responsive():
+        for i, sz in zip(todo, _pool().map(lambda n: size_of(items[n]["location"]), todo)):
+            sizes[i] = sz
     return sizes
 
 
