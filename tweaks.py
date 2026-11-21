@@ -597,7 +597,22 @@ def _all_reg(root, path, names, expected):
     return all(_reg(root, path, name) == expected for name in names)
 
 
+POWER_KEY = r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes"
+
+
 def _active_power():
+    # read the active plan from the registry (instant); fall back to powercfg only if that fails
+    try:
+        guid = _reg(HKLM, POWER_KEY, "ActivePowerScheme")
+        if guid:
+            if guid.lower() == "e9a42b02-d5df-448d-aa00-03f14749eb61":
+                return True
+            name = _reg(HKLM, POWER_KEY + "\\" + guid, "FriendlyName")
+            if isinstance(name, str):
+                return "ultimate performance" in name.lower()
+            return False
+    except OSError:
+        pass
     active_scheme = run(["powercfg", "/getactivescheme"]).lower()
     # Check for standard GUID or any Ultimate Performance plan name
     return "e9a42b02-d5df-448d-aa00-03f14749eb61" in active_scheme or "ultimate performance" in active_scheme

@@ -98,7 +98,7 @@ run.bat
 `run.bat` installs the required Python package (PySide6) and starts the app.
 
 ### Build it yourself
-Requires Python 3, the .NET 8 SDK and [Inno Setup](https://jrsoftware.org/isinfo.php).
+Requires Python 3, the .NET 11 SDK and [Inno Setup](https://jrsoftware.org/isinfo.php).
 
 ```bat
 build-installer.bat   :: builds the installer into the installer folder

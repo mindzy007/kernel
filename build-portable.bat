@@ -5,7 +5,7 @@ cd /d "%~dp0"
 
 python -m PyInstaller --version >nul 2>&1 || python -m pip install -q --upgrade pyinstaller PySide6-Essentials || goto :fail
 if not exist monitor-helper\out\kernel-monitor.exe (
-  echo Building monitor helper (needs .NET 8 SDK^)...
+  echo Building monitor helper (needs .NET 11 SDK^)...
   dotnet publish monitor-helper -c Release -o monitor-helper\out || goto :fail
 )
 
@@ -21,6 +21,7 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin ^
   --add-data "%CD%\fonts;fonts" --add-data "%CD%\assets;assets" ^
   --add-data "%CD%\monitor-helper\out\kernel-monitor.exe;monitor-helper" ^
   "%CD%\kernel.py" || goto :fail
+if exist build rmdir /s /q build
 
 echo.
 echo DONE: installer\Kernel-Portable-%VER%.exe

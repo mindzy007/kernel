@@ -3950,6 +3950,8 @@ class Kernel(QWidget):
         self.icon_q = queue.Queue()
         self.icon_done = queue.Queue()
         self.info_q, self.info_done, self.info_rows = queue.Queue(), queue.Queue(), {}
+        self.info_deferred = []  # app version/size lookups wait until the page is opened (or a few seconds in)
+        QTimer.singleShot(8000, self.flush_info)
         for _ in range(4):
             threading.Thread(target=self.info_loop, daemon=True).start()
         self.icon_timer = QTimer(self)
@@ -4263,6 +4265,19 @@ class Kernel(QWidget):
         self.navs.append((index, b))
         return b
 
+    def flush_info(self):
+        """Start the queued app version/size lookups (once)."""
+        pending, self.info_deferred = self.info_deferred, []
+        for pkg in pending:
+            self.info_q.put(pkg)
+
+    def start_specs_scan(self):
+        """Hardware and Windows Update detection run once, when Specifications is first opened or shortly after launch."""
+        if getattr(self, "specs_scan_started", False):
+            return
+        self.specs_scan_started = True
+        threading.Thread(target=self.specs_scan, daemon=True).start()
+
     def goto(self, index):
         if self.overlay.isVisible():
             self.collapse_downloads()
@@ -4278,6 +4293,8 @@ class Kernel(QWidget):
         self.stack.setCurrentIndex(index)
         if hasattr(self, "titlebar"):
             self.titlebar.schedule(instant=True)
+        if index == APPS:
+            self.flush_info()
         if index == APPS and time.time() - getattr(self, "info_stamp", 0) > 1800:
             self.info_stamp = time.time()  # re-check versions/sizes when the page is opened (cache keeps it cheap)
             for key in list(self.info_rows):
@@ -4285,6 +4302,7 @@ class Kernel(QWidget):
         if index == GAMING:
             self.refresh_display_status()
         if index == SPECS:
+            self.start_specs_scan()
             self.start_monitor()
         if index == STORAGE and not self.storage_scanned:
             self.refresh_drives(False)  # first visit only (uses saved results if fresh); Rescan forces it
@@ -5241,7 +5259,7 @@ class Kernel(QWidget):
             for _, name, pkg, domain in sorted((c for c in apps.CATALOG if c[0] == cat), key=lambda c: c[1].lower()):
                 row = ActionRow(name, "", self.app_actions(pkg), self, pkg, domain)
                 self.info_rows[pkg] = row
-                self.info_q.put(pkg)
+                self.info_deferred.append(pkg)
                 self.info_stamp = time.time()
                 bl.addWidget(row)
                 entries.append((f"{cat} {name} {pkg}".lower(), row))
@@ -5306,7 +5324,8 @@ class Kernel(QWidget):
                 return
             self.specs_ready.emit(pairs, windows)
             self.updates_ready.emit(specs.check_updates())
-        threading.Thread(target=work, daemon=True).start()
+        self.specs_scan = work
+        QTimer.singleShot(20000, self.start_specs_scan)  # idle fallback; opening the page starts it sooner
         return page
 
     def show_specs(self, pairs, windows):
@@ -6258,7 +6277,13 @@ if __name__ == "__main__":
     app.setStyleSheet(QSS)
     no_tips = NoToolTips(app)
     app.installEventFilter(no_tips)
+    _t0 = time.perf_counter()
     w = Kernel()
+    _t1 = time.perf_counter()
     w.prewarm_layout()
+    _t2 = time.perf_counter()
     w.show()
+    if os.environ.get("KERNEL_PROFILE"):  # run with KERNEL_PROFILE=1 to see where launch time goes
+        print(f"startup: build UI {_t1 - _t0:.2f}s, prewarm layout {_t2 - _t1:.2f}s, show {time.perf_counter() - _t2:.2f}s",
+              file=sys.stderr)
     sys.exit(app.exec())

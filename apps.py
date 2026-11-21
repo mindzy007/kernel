@@ -326,17 +326,22 @@ _sources_lock = threading.Lock()
 _sources_done = False
 
 
+def _update_sources():
+    try:
+        winget(["source", "update", "--name", "winget"], track=False)
+    except Exception:
+        pass
+
+
 def refresh_sources():
-    """Once per run, ask winget to update its package index so `winget show` reports the newest versions."""
+    """Once per run, refresh winget's package index in the background. Lookups never wait for it: the first ones
+    may still see the old index, later ones (and the next launch) see the fresh one."""
     global _sources_done
     with _sources_lock:
         if _sources_done or not winget_path():
             return
         _sources_done = True
-        try:
-            winget(["source", "update", "--name", "winget"], track=False)
-        except Exception:
-            pass
+    threading.Thread(target=_update_sources, daemon=True).start()
 
 
 def _info_cache():

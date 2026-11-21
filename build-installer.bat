@@ -5,7 +5,7 @@ cd /d "%~dp0"
 echo [1/4] Installing tools...
 python -m pip install -q --upgrade pyinstaller PySide6-Essentials || goto :fail
 
-echo [2/4] Building monitor helper (needs .NET 8 SDK)...
+echo [2/4] Building monitor helper (needs .NET 11 SDK)...
 dotnet publish monitor-helper -c Release -o monitor-helper\out || goto :fail
 
 if exist __pycache__ rmdir /s /q __pycache__
@@ -36,6 +36,8 @@ if not defined ISCC if exist "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" set ISC
 if not defined ISCC if exist "%LocalAppData%\Programs\Inno Setup 6\ISCC.exe" set ISCC="%LocalAppData%\Programs\Inno Setup 6\ISCC.exe"
 if not defined ISCC echo Inno Setup not found & goto :fail
 %ISCC% /DAppVersion=%VER% kernel.iss || goto :fail
+if exist build rmdir /s /q build
+if exist dist rmdir /s /q dist
 
 echo.
 echo DONE: installer is in the "installer" folder.
