@@ -1,4 +1,5 @@
 import ctypes
+import functools
 import json
 import os
 import re
@@ -9,6 +10,7 @@ import threading
 import time
 import winreg
 from concurrent.futures import ThreadPoolExecutor
+from ctypes import wintypes
 
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
 BELOW_NORMAL = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
@@ -53,9 +55,10 @@ def drives():
 
 MODEL_SCRIPT = r"""
 $ErrorActionPreference = 'SilentlyContinue'
+$names = @{}
+Get-Disk | ForEach-Object { $names[[int]$_.Number] = (($_.FriendlyName -replace '\s+', ' ')).Trim() }
 @(Get-Partition | Where-Object { $_.DriveLetter } | ForEach-Object {
-  $d = Get-Disk -Number $_.DiskNumber
-  [pscustomobject]@{ letter = [string]$_.DriveLetter; model = (($d.FriendlyName -replace '\s+', ' ')).Trim() }
+  [pscustomobject]@{ letter = [string]$_.DriveLetter; model = $names[[int]$_.DiskNumber] }
 }) | ConvertTo-Json -Compress
 """
 
@@ -92,13 +95,22 @@ def is_removable(root):
 
 
 def load_cache(path, roots, max_age=6 * 3600):
-    """Saved scan results {root: result} if they are fresh and cover exactly these drives, else None."""
+    """Saved scan results {root: result} if they are fresh and cover these drives, else None.
+    Removable drives are never scanned, so plugging one in or out does not throw the cache away."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        if time.time() - data["time"] > max_age or sorted(data["drives"]) != sorted(roots):
+        if time.time() - data["time"] > max_age:
             return None
-        return data["drives"]
+        saved, out = data["drives"], {}
+        for root in roots:
+            if root in saved:
+                out[root] = saved[root]
+            elif is_removable(root):
+                out[root] = {"root": [], "user": [], "categories": [], "apps": [], "skipped": True}
+            else:
+                return None
+        return out
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -114,21 +126,80 @@ def save_cache(path, drives):
 
 _POOL = None
 _POOL_LOCK = threading.Lock()
+CPUS = os.cpu_count() or 4
+KEEP_DEPTH = 4  # folders up to this many levels under a drive root keep their own size (deeper ones count into them)
+_SLOTS = threading.BoundedSemaphore(3)  # most folder tasks running at once, over every drive: more starves the UI of the GIL
+BUSY, REST = 0.004, 0.002  # a scan thread works at most BUSY seconds, then sleeps REST so the UI thread gets the GIL
+_MOUNT_POINT_TAG = 0xA0000003  # IO_REPARSE_TAG_MOUNT_POINT: junctions and folders a volume is mounted on
 
 
 def _pool():
-    """One small pool shared by every scan. Fewer busy Python threads means less GIL fighting with the UI."""
+    """Small shared pool for one-off folder sizes (apps that sit deeper than KEEP_DEPTH)."""
     global _POOL
     with _POOL_LOCK:
         if _POOL is None:
-            _POOL = ThreadPoolExecutor(2, initializer=lower_priority)
+            _POOL = ThreadPoolExecutor(4, initializer=lower_priority)
         return _POOL
 
 
+def _is_junction(entry):
+    """A junction or mounted volume. Following one counts the same bytes twice or wanders onto another drive."""
+    try:
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_file_attributes", 0) & 0x400) and getattr(st, "st_reparse_tag", 0) == _MOUNT_POINT_TAG
+
+
+@functools.lru_cache(maxsize=None)
+def _has_seek_penalty(root):
+    """True for a spinning disk, False for an SSD / NVMe drive, None when Windows will not say."""
+    class Query(ctypes.Structure):
+        _fields_ = [("PropertyId", wintypes.DWORD), ("QueryType", wintypes.DWORD), ("Extra", ctypes.c_ubyte * 1)]
+
+    class Descriptor(ctypes.Structure):
+        _fields_ = [("Version", wintypes.DWORD), ("Size", wintypes.DWORD), ("IncursSeekPenalty", ctypes.c_ubyte)]
+
+    handle = None
+    k = None
+    try:
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                  wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k.CreateFileW.restype = wintypes.HANDLE
+        k.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+        k.DeviceIoControl.restype = wintypes.BOOL
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = k.CreateFileW("\\\\.\\" + root[:2], 0, 3, None, 3, 0, None)  # no access rights: just ask about the device
+        if handle in (None, ctypes.c_void_p(-1).value):
+            handle = None
+            return None
+        query, out, got = Query(7, 0), Descriptor(), wintypes.DWORD()  # StorageDeviceSeekPenaltyProperty, standard query
+        ok = k.DeviceIoControl(handle, 0x002D1400, ctypes.byref(query), ctypes.sizeof(query),  # IOCTL_STORAGE_QUERY_PROPERTY
+                               ctypes.byref(out), ctypes.sizeof(out), ctypes.byref(got), None)
+        return bool(out.IncursSeekPenalty) if ok else None
+    except Exception:
+        return None
+    finally:
+        if handle and k is not None:
+            try:
+                k.CloseHandle(handle)
+            except Exception:
+                pass
+
+
+def workers_for(root):
+    """How many threads may walk one drive: a few for an SSD, two for a hard disk (its head has to seek)."""
+    penalty = _has_seek_penalty(root)
+    return 2 if penalty is True else 3
+
+
 def size_of(path):
-    """Total bytes under path (files only, symlinks not followed)."""
+    """Total bytes under path (files only, symlinks and junctions not followed)."""
     total = 0
     count = 0
+    last = time.perf_counter()
     stack = [path]
     while stack:
         cur = stack.pop()
@@ -136,13 +207,15 @@ def size_of(path):
             with os.scandir(cur) as it:
                 for e in it:
                     count += 1
-                    if count % 200 == 0:
-                        time.sleep(0.001)  # hand the GIL to the UI thread
+                    if not count % 256 and time.perf_counter() - last > BUSY:
+                        time.sleep(REST)  # hand the GIL to the UI thread
+                        last = time.perf_counter()
                     try:
                         if e.is_symlink():
                             continue
                         if e.is_dir(follow_symlinks=False):
-                            stack.append(e.path)
+                            if not _is_junction(e):
+                                stack.append(e.path)
                         else:
                             total += e.stat(follow_symlinks=False).st_size
                     except OSError:
@@ -152,11 +225,149 @@ def size_of(path):
     return total
 
 
+class _Node:
+    __slots__ = ("path", "depth", "parent", "total", "kids", "files")
+
+    def __init__(self, path, depth, parent):
+        self.path, self.depth, self.parent = path, depth, parent
+        self.total = 0   # bytes of this folder's own files (and everything below KEEP_DEPTH); children are added at the end
+        self.kids = []   # tracked sub-folders
+        self.files = []  # [(path, bytes)] files directly in this folder (only the biggest ones, below the drive root)
+
+
+class DriveTree:
+    """Every folder's size, down to KEEP_DEPTH levels under a drive root, from ONE parallel walk of the drive.
+
+    The old scan sized each top-level folder on a shared two-thread pool, so one big folder (Windows, Users,
+    Program Files) kept a single thread busy while the rest idled, every drive queued behind the same two
+    threads, and every installed app's folder was walked a second time afterwards. Here a few threads walk the
+    drive together, idle threads take over half of a busy thread's pending folders, and the sizes of the
+    folders that the results need (top-level folders, the user profile, app folders) come out of the same walk.
+    """
+
+    def __init__(self, root, workers=None):
+        self.root = root
+        self._nodes = []
+        self._index = {}
+        self._work = []
+        self._cond = threading.Condition()
+        self._lock = threading.Lock()
+        self._pending = 0
+        self._idle = 0
+        top = _Node(root, 0, None)
+        self._nodes.append(top)
+        self._push(root, 0, top)
+        threads = [threading.Thread(target=self._worker, daemon=True) for _ in range(max(1, workers or workers_for(root)))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for n in reversed(self._nodes):  # a child always comes after its parent in the list
+            if n.parent is not None:
+                n.parent.total += n.total
+        self._index = {_norm(n.path): n for n in self._nodes}
+
+    @property
+    def total(self):
+        return self._nodes[0].total
+
+    def size(self, path):
+        """Bytes under path, or None if the walk did not track that folder (too deep or unreadable)."""
+        node = self._index.get(_norm(path))
+        return node.total if node else None
+
+    def children(self, path):
+        """[(path, bytes, is_dir)] for the direct children of a tracked folder (every file for the drive root, the
+        biggest ones elsewhere), or None if that folder's children were not tracked."""
+        node = self._index.get(_norm(path))
+        if node is None or node.depth >= KEEP_DEPTH:
+            return None
+        return [(k.path, k.total, True) for k in node.kids] + [(p, sz, False) for p, sz in node.files]
+
+    def _push(self, path, depth, node):
+        with self._cond:
+            self._pending += 1
+            self._work.append((path, depth, node))
+            self._cond.notify()
+
+    def _worker(self):
+        lower_priority()
+        while True:
+            with self._cond:
+                while not self._work:
+                    if self._pending == 0:
+                        return
+                    self._idle += 1
+                    self._cond.wait()
+                    self._idle -= 1
+                task = self._work.pop()
+            try:
+                with _SLOTS:
+                    self._run(*task)
+            except Exception:
+                pass
+            finally:
+                with self._cond:
+                    self._pending -= 1
+                    if self._pending == 0:
+                        self._cond.notify_all()
+
+    def _run(self, path, depth, node):
+        own = 0
+        seen = 0
+        last = time.perf_counter()
+        stack = [(path, depth)]
+        while stack:
+            cur, d = stack.pop()
+            tracked = d < KEEP_DEPTH  # sub-folders of this folder get their own node and task
+            try:
+                with os.scandir(cur) as it:
+                    for e in it:
+                        seen += 1
+                        if not seen % 256 and time.perf_counter() - last > BUSY:
+                            time.sleep(REST)  # hand the GIL to the UI thread
+                            last = time.perf_counter()
+                        try:
+                            if e.is_symlink():
+                                continue
+                            if e.is_dir(follow_symlinks=False):
+                                if _is_junction(e):
+                                    continue
+                                if tracked:
+                                    child = _Node(e.path, d + 1, node)
+                                    node.kids.append(child)
+                                    self._nodes.append(child)
+                                    self._push(e.path, d + 1, child)
+                                else:
+                                    stack.append((e.path, d + 1))
+                            else:
+                                size = e.stat(follow_symlinks=False).st_size
+                                own += size
+                                if tracked:
+                                    files = node.files
+                                    files.append((e.path, size))
+                                    if len(files) > 256 and node.depth:
+                                        files.sort(key=lambda f: f[1], reverse=True)
+                                        del files[32:]
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+            if self._idle and len(stack) > 1:  # someone has run dry: give away the older (bigger) half
+                give, stack = stack[:len(stack) // 2], stack[len(stack) // 2:]
+                for p, dd in give:
+                    self._push(p, dd, node)
+        with self._lock:
+            node.total += own
+
+
 def _entry_size(entry):
     try:
         if entry.is_symlink():
             return None
         if entry.is_dir(follow_symlinks=False):
+            if _is_junction(entry):
+                return None
             return entry.path, size_of(entry.path), True
         return entry.path, entry.stat(follow_symlinks=False).st_size, False
     except OSError:
@@ -431,14 +642,43 @@ def _steam_apps():
     return out
 
 
-def installed_apps():
-    """Installed desktop apps, Steam games and Store apps with sizes: list of dicts."""
-    items = _registry_apps() + _steam_apps() + _appx_apps()
-    # Steam already reports each game's size: no need to walk those huge folders.
-    sizes = list(_pool().map(
-        lambda it: it["estimate"] if it.get("trusted") and it["estimate"] else
-        (size_of(it["location"]) if it["location"] else it["estimate"]), items))
-    launch = launcher_game_dirs()
+def app_items():
+    """Installed desktop apps, Steam games and Store apps, without sizes: list of dicts."""
+    with ThreadPoolExecutor(1) as ex:
+        store = ex.submit(_appx_apps)  # PowerShell takes seconds: run it while the registry is read
+        items = _registry_apps() + _steam_apps()
+        return items + store.result()
+
+
+def _known_size(it, tree):
+    """The size when it is free to get (a store figure, or the drive walk already measured it), else None."""
+    if it.get("trusted") and it["estimate"]:
+        return it["estimate"]  # Steam already reports each game's size: no need to walk those huge folders
+    if not it["location"]:
+        return it["estimate"]
+    return tree.size(it["location"]) if tree is not None else None
+
+
+def _sizes(items, tree=None):
+    sizes = [_known_size(it, tree) for it in items]
+    todo = [i for i, sz in enumerate(sizes) if sz is None]
+    for i, sz in zip(todo, _pool().map(lambda n: size_of(items[n]["location"]), todo)):
+        sizes[i] = sz
+    return sizes
+
+
+_LAUNCH = [0.0, set()]
+
+
+def _launcher_dirs():
+    if time.time() - _LAUNCH[0] > 30:
+        _LAUNCH[:] = [time.time(), launcher_game_dirs()]
+    return _LAUNCH[1]
+
+
+def _finalize(items, sizes):
+    """Keep the apps big enough to matter, flag games, and drop apps that only contain other listed apps."""
+    launch = _launcher_dirs()
     kept, seen = [], set()
     for it, size in sorted(zip(items, sizes), key=lambda p: p[1], reverse=True):
         key = _norm(it["location"]) if it["location"] else None
@@ -459,6 +699,12 @@ def installed_apps():
                 continue
         result.append(it)
     return result
+
+
+def installed_apps():
+    """Installed desktop apps, Steam games and Store apps with sizes: list of dicts."""
+    items = app_items()
+    return _finalize(items, _sizes(items))
 
 
 CATEGORIES = ("Apps", "Games", "Documents & files", "System", "Other")
@@ -510,24 +756,29 @@ def categorize(root, entries, apps, used):
 
 def analyze(root, apps=None):
     """Category breakdown, top-level hogs, the biggest items in the user profile (if on that drive)
-    and the largest installed apps and games on the drive."""
-    entries = sized_children(root)
+    and the largest installed apps and games on the drive. `apps` is a list (or a function returning one)
+    from app_items() or installed_apps()."""
+    tree = DriveTree(root)
+    entries = tree.children(root) or []
     biggest = sorted(entries, key=lambda r: r[1], reverse=True)[:10]
     result = {"root": biggest, "user": [], "categories": [], "apps": []}
     drive = os.path.splitdrive(root)[0].upper()
     profile = os.path.expanduser("~")
     if os.path.splitdrive(profile)[0].upper() == drive:
-        result["user"] = largest(profile, 10)
+        kids = tree.children(profile)  # already measured by the drive walk
+        result["user"] = sorted(kids, key=lambda r: r[1], reverse=True)[:10] if kids is not None else largest(profile, 10)
     try:
         total, used, _ = shutil.disk_usage(root)
         if callable(apps):  # lazy: lets the folder scan overlap with the installed-apps lookup
             apps = apps()
         elif apps is None:
-            apps = installed_apps()
+            apps = app_items()
     except OSError:
         total, used, apps = 0, sum(r[1] for r in entries), []
     system_drive = os.path.splitdrive(os.environ.get("SystemRoot", "C:\\Windows"))[0].upper()
     here = [a for a in apps if (os.path.splitdrive(a["location"])[0].upper() if a["location"] else system_drive) == drive]
+    if not all("size" in a for a in here):  # unsized list from app_items(): size just this drive's apps
+        here = _finalize(here, _sizes(here, tree))
     result["categories"] = categorize(root, entries, [a for a in here if a["location"]], used)
     result["apps"] = here[:15]
     return result

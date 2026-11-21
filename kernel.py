@@ -4984,7 +4984,7 @@ class Kernel(QWidget):
             def load_apps():
                 storage.lower_priority()
                 try:
-                    apps_future.set_result(storage.installed_apps())
+                    apps_future.set_result(storage.app_items())  # unsized: each drive sizes its own apps from its walk
                 except Exception:
                     apps_future.set_result([])
             threading.Thread(target=load_apps, daemon=True).start()
@@ -5000,7 +5000,7 @@ class Kernel(QWidget):
                         res = {"root": [], "user": [], "categories": [], "apps": [], "failed": True}
                 results[root] = res
                 self.storage_ready.emit(root, res)  # each drive shows up as soon as it finishes
-            with ThreadPoolExecutor(max(1, min(3, len(roots))), initializer=storage.lower_priority) as pool:
+            with ThreadPoolExecutor(max(1, min(8, len(roots))), initializer=storage.lower_priority) as pool:  # drives scan side by side; storage caps the real thread count
                 list(pool.map(scan, roots))
             if not any(r.get("failed") for r in results.values()):
                 storage.save_cache(cache_path, results)
