@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="icon.png" alt="Kernel" width="96" height="96">
+<img src="\kernel\icon.png" alt="Kernel" width="96" height="96">
 
 # Kernel
 
