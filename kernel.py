@@ -2649,12 +2649,12 @@ class BadgeZoom(QGraphicsEffect):
         painter.restore()
 
 
-class ResultPopup(QWidget):
+class ResultPopup(Panel):
     """Badge that zooms in at the top of the window to say an action ran: a status icon, what ran, what
-    happened and a countdown line. It zooms out by itself (it waits while the pointer is on it); the X or Esc
+    happened. It zooms out by itself after 2.5 s; the X or Esc
     closes it sooner and "View log" opens the Activity page."""
     view_log = Signal()
-    H, GAP, SHOW_MS = 58, 14, 5000
+    H, GAP, SHOW_MS = 56, 14, 2500
     IN, OUT = 0.78, 0.92  # scale it grows from / shrinks to
 
     def __init__(self, parent):
@@ -2662,15 +2662,12 @@ class ResultPopup(QWidget):
         self.failed, self.note = False, ""
         self.out = False    # zooming out
         self.k, self.o = 1.0, 0.0  # current scale and opacity
-        self.frac = 1.0     # time left on the countdown line
         self.ok = True
         self.zoom = None
-        self.bar = QVariantAnimation(self)
-        self.bar.setDuration(self.SHOW_MS)
-        self.bar.setStartValue(1.0)
-        self.bar.setEndValue(0.0)
-        self.bar.valueChanged.connect(self.tick)
-        self.bar.finished.connect(self.dismiss)
+        self.bar = QTimer(self)  # how long it stays up
+        self.bar.setSingleShot(True)
+        self.bar.setInterval(self.SHOW_MS)
+        self.bar.timeout.connect(self.dismiss)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(13, 0, 10, 0)
         lay.setSpacing(12)
@@ -2703,9 +2700,10 @@ class ResultPopup(QWidget):
         self.setFixedHeight(self.H)
         self.hide()
 
-    def tick(self, v):
-        self.frac = float(v)
-        self.update()
+    def snap(self):
+        """Blur the window behind the badge, exactly like the Downloads panel (Panel paints its own part of it)."""
+        self.hide()  # keep the badge itself out of the snapshot
+        self.bg = blurred(self.parentWidget().grab())
 
     def home(self):
         p = self.parentWidget()
@@ -2742,8 +2740,8 @@ class ResultPopup(QWidget):
         lay.invalidate()
         lay.activate()
         self.setFixedWidth(lay.sizeHint().width())  # sized from the new text, not the previous one
+        self.snap()
         self.bar.stop()
-        self.frac = 1.0
         self.animate(self.IN, 1.0, 0.0, 1.0, False, 420, QEasingCurve.OutCubic)
 
     def animate(self, k0, k1, o0, o1, hide, ms, ease, then=None):
@@ -2787,29 +2785,6 @@ class ResultPopup(QWidget):
         if self.isVisible() and not self.out:
             self.bar.stop()
             self.animate(self.k, self.OUT, self.o, 0.0, True, 200, QEasingCurve.InCubic)
-
-    def enterEvent(self, e):
-        if self.bar.state() == QVariantAnimation.Running:
-            self.bar.pause()  # stay while the pointer is on it
-        super().enterEvent(e)
-
-    def leaveEvent(self, e):
-        if self.bar.state() == QVariantAnimation.Paused:
-            self.bar.resume()
-        super().leaveEvent(e)
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        path = QPainterPath()
-        path.addRoundedRect(r, 17, 17)
-        p.fillPath(path, QColor(20, 20, 20, 245))
-        p.setClipPath(path)
-        p.fillRect(QRectF(0, r.bottom() - 1.5, r.width() * self.frac, 2.5), QColor(255, 255, 255, 110))
-        p.setClipping(False)
-        p.setPen(QPen(QColor(255, 255, 255, 26), 1))
-        p.drawPath(path)
 
 
 class SearchDock(QWidget):
