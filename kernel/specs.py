@@ -1,6 +1,8 @@
 """Detect this PC's hardware and OS details as (label, value) pairs."""
+import ctypes
 import json
 import subprocess
+from ctypes import wintypes
 
 NOWIN = 0x08000000  # CREATE_NO_WINDOW
 
@@ -21,6 +23,8 @@ $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
   gpu = @(Get-CimInstance Win32_VideoController | Select-Object Name, AdapterCompatibility, DriverVersion, CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate)
   ram = @(Get-CimInstance Win32_PhysicalMemory | Select-Object Capacity, Speed, ConfiguredClockSpeed, Manufacturer, PartNumber, DeviceLocator, SMBIOSMemoryType)
   disk = @(Get-CimInstance Win32_DiskDrive | Select-Object Model, Size)
+  mon = @(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID | ForEach-Object {
+    [pscustomobject]@{ id = $_.InstanceName; name = (-join ($_.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ })) } })
 } | ConvertTo-Json -Depth 4 -Compress
 """
 
@@ -74,6 +78,64 @@ def _gpu_driver(gpu):
     return "Not applicable"
 
 
+class _DISPLAY_DEVICE(ctypes.Structure):
+    _fields_ = [("cb", wintypes.DWORD), ("DeviceName", wintypes.WCHAR * 32), ("DeviceString", wintypes.WCHAR * 128),
+                ("StateFlags", wintypes.DWORD), ("DeviceID", wintypes.WCHAR * 128), ("DeviceKey", wintypes.WCHAR * 128)]
+
+
+class _DEVMODE(ctypes.Structure):
+    _fields_ = [("dmDeviceName", wintypes.WCHAR * 32), ("dmSpecVersion", wintypes.WORD),
+                ("dmDriverVersion", wintypes.WORD), ("dmSize", wintypes.WORD), ("dmDriverExtra", wintypes.WORD),
+                ("dmFields", wintypes.DWORD), ("dmPositionX", wintypes.LONG), ("dmPositionY", wintypes.LONG),
+                ("dmDisplayOrientation", wintypes.DWORD), ("dmDisplayFixedOutput", wintypes.DWORD),
+                ("dmColor", ctypes.c_short), ("dmDuplex", ctypes.c_short), ("dmYResolution", ctypes.c_short),
+                ("dmTTOption", ctypes.c_short), ("dmCollate", ctypes.c_short), ("dmFormName", wintypes.WCHAR * 32),
+                ("dmLogPixels", wintypes.WORD), ("dmBitsPerPel", wintypes.DWORD), ("dmPelsWidth", wintypes.DWORD),
+                ("dmPelsHeight", wintypes.DWORD), ("dmDisplayFlags", wintypes.DWORD),
+                ("dmDisplayFrequency", wintypes.DWORD), ("dmICMMethod", wintypes.DWORD),
+                ("dmICMIntent", wintypes.DWORD), ("dmMediaType", wintypes.DWORD), ("dmDitherType", wintypes.DWORD),
+                ("dmReserved1", wintypes.DWORD), ("dmReserved2", wintypes.DWORD),
+                ("dmPanningWidth", wintypes.DWORD), ("dmPanningHeight", wintypes.DWORD)]
+
+
+def _displays(models=None):
+    """Every monitor currently on the desktop as (is main, width, height, refresh Hz, name), main first.
+
+    models maps a monitor's PnP id (like AUS27A1) to the model name stored in its EDID. Windows reports
+    "Generic PnP Monitor" for monitors that have no specific driver, so that name replaces the generic one."""
+    models = models or {}
+    found = []
+    try:
+        user32 = ctypes.windll.user32
+        i = 0
+        while True:
+            dev = _DISPLAY_DEVICE()
+            dev.cb = ctypes.sizeof(dev)
+            if not user32.EnumDisplayDevicesW(None, i, ctypes.byref(dev), 0):
+                break
+            i += 1
+            if not dev.StateFlags & 0x1:  # not attached to the desktop
+                continue
+            mode = _DEVMODE()
+            mode.dmSize = ctypes.sizeof(mode)
+            if not user32.EnumDisplaySettingsW(dev.DeviceName, -1, ctypes.byref(mode)):  # -1 = current mode
+                continue
+            mon = _DISPLAY_DEVICE()
+            mon.cb = ctypes.sizeof(mon)
+            name = ""
+            if user32.EnumDisplayDevicesW(dev.DeviceName, 0, ctypes.byref(mon), 0):
+                name = _clean(mon.DeviceString)
+                parts = mon.DeviceID.split("\\")  # MONITOR\AUS27A1\{guid}\0001
+                edid_name = models.get(parts[1].upper()) if len(parts) > 1 else None
+                if edid_name and (not name or name.lower().startswith("generic")):
+                    name = edid_name
+            found.append((bool(dev.StateFlags & 0x4), mode.dmPelsWidth, mode.dmPelsHeight,
+                          mode.dmDisplayFrequency, name))
+    except Exception:
+        return []
+    return sorted(found, key=lambda d: not d[0])
+
+
 def collect():
     """Return (hardware (label, value) pairs, Windows version text)."""
     r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", SCRIPT],
@@ -92,8 +154,9 @@ def collect():
     bb = data.get("bb") or {}
     bios = data.get("bios") or {}
     add("PC", f"{_clean(cs.get('Manufacturer'))} {_clean(cs.get('Model'))}")
-    add("Motherboard", f"{_clean(bb.get('Manufacturer'))} {_clean(bb.get('Product'))}")
-    add("BIOS", _clean(bios.get("SMBIOSBIOSVersion")))
+    board = f"{_clean(bb.get('Manufacturer'))} {_clean(bb.get('Product'))}".strip()
+    bios_version = _clean(bios.get("SMBIOSBIOSVersion"))
+    add("Motherboard", f"{board} · BIOS {bios_version}" if board and bios_version else board or bios_version)
 
     cpus = _list(data.get("cpu"))
     for i, c in enumerate(cpus, 1):
@@ -117,13 +180,23 @@ def collect():
     add("Memory", "\n".join(lines))
 
     gpus = _list(data.get("gpu"))
+    models = {}
+    for m in _list(data.get("mon")):
+        parts = str(m.get("id") or "").split("\\")  # DISPLAY\AUS27A1\5&...
+        if len(parts) > 1 and _clean(m.get("name")):
+            models[parts[1].upper()] = _clean(m.get("name"))
+    displays = _displays(models)
     for i, g in enumerate(gpus, 1):
         tag = "GPU" if len(gpus) == 1 else f"GPU {i}"
         add(tag, g.get("Name"))
         add(f"{tag} driver", _gpu_driver(g))
-        if g.get("CurrentHorizontalResolution"):
+        if not displays and g.get("CurrentHorizontalResolution"):
             add(f"{tag} display",
                 f"{g['CurrentHorizontalResolution']}x{g['CurrentVerticalResolution']} @ {g.get('CurrentRefreshRate')} Hz")
+    for i, (main, width, height, hz, name) in enumerate(displays, 1):
+        detail = f"{width}x{height} @ {hz} Hz"
+        extras = [p for p in (name, "main" if main and len(displays) > 1 else "") if p]
+        add("Display" if len(displays) == 1 else f"Display {i}", detail + (f" ({', '.join(extras)})" if extras else ""))
 
     for i, d in enumerate(_list(data.get("disk")), 1):
         size = d.get("Size")

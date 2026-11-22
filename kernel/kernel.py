@@ -2492,22 +2492,29 @@ class Panel(QFrame):
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         path = QPainterPath()
         path.addRoundedRect(r, 18, 18)
-        p.setClipPath(path)
-        # Source mode replaces whatever is underneath, so a partial repaint (a hovered row) can never
-        # stack another tinted layer on top of the old one and leave dark boxes behind.
-        p.setCompositionMode(QPainter.CompositionMode_Source)
-        p.fillPath(path, QColor(BG))
+        src = None
         if self.bg and self.bg_src is not None:
-            p.drawPixmap(QRectF(self.rect()), self.bg, self.bg_src)
+            src = self.bg_src
         elif self.bg:
             k = self.bg.width() / max(self.window().width(), 1)
             g = self.geometry()
-            p.drawPixmap(QRectF(self.rect()), self.bg, QRectF(g.x() * k, g.y() * k, g.width() * k, g.height() * k))
+            src = QRectF(g.x() * k, g.y() * k, g.width() * k, g.height() * k)
+        # Source mode replaces whatever is underneath, so a partial repaint (a hovered row) can never
+        # stack another tinted layer on top of the old one and leave dark boxes behind. The blurred picture is
+        # painted as the fill of the rounded shape itself (no clip path): a clip plus a fill would apply the
+        # anti-aliased corner coverage twice and leave a visible rim around the edge.
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        if src is not None and src.width() > 0 and src.height() > 0:
+            sx, sy = self.width() / src.width(), self.height() / src.height()
+            brush = QBrush(self.bg)
+            brush.setTransform(QTransform(sx, 0, 0, sy, -src.x() * sx, -src.y() * sy))
+            p.fillPath(path, brush)
+        else:
+            p.fillPath(path, QColor(BG))
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
         p.fillPath(path, QColor(14, 14, 14, self.TINT))
         if self.WASH:
             p.fillPath(path, QColor(255, 255, 255, self.WASH))
-        p.setClipping(False)
         p.setPen(QPen(QColor(255, 255, 255, 18), 1))
         p.drawPath(path)
 
@@ -2662,7 +2669,7 @@ class ResultPopup(Panel):
     closes it sooner and "View log" opens the Activity page."""
     view_log = Signal()
     H, GAP, SHOW_MS = 56, 14, 2500
-    IN, OUT = 0.6, 0.90  # scale it grows from / shrinks to
+    IN, OUT = 0.6, 0.92  # scale it grows from / shrinks to
     TINT, WASH = 100, 7  # dark tint over the blur; white wash makes it a touch brighter than the app
 
     def __init__(self, parent):
@@ -4215,7 +4222,17 @@ class Kernel(QWidget):
         self.icon_done = queue.Queue()
         self.info_q, self.info_done, self.info_rows = queue.Queue(), queue.Queue(), {}
         self.info_deferred = []  # app version/size lookups wait until the page is opened (or a few seconds in)
-        QTimer.singleShot(8000, self.flush_info)
+        QTimer.singleShot(2000, self.flush_info)  # version/size lookups start shortly after launch, not on first open
+        # last known versions/sizes: rows show them straight away and the lookups below only refresh them
+        self.info_cache_path = os.path.join(self.cfg.dir, "apps_info.json")
+        self.info_dirty = False
+        try:
+            with open(self.info_cache_path, encoding="utf-8") as f:
+                self.info_cache = json.load(f)
+        except (OSError, ValueError):
+            self.info_cache = {}
+        if not isinstance(self.info_cache, dict):
+            self.info_cache = {}
         for _ in range(4):
             threading.Thread(target=self.info_loop, daemon=True).start()
         self.icon_timer = QTimer(self)
@@ -4643,6 +4660,9 @@ class Kernel(QWidget):
             row = self.info_rows.get(key)
             if row is not None and isValid(row) and version:
                 row.set_info(version, size, url)
+                if self.info_cache.get(key) != [version, size, url]:
+                    self.info_cache[key] = [version, size, url]
+                    self.info_dirty = True
 
     def info_loop(self):
         while True:
@@ -5530,6 +5550,9 @@ class Kernel(QWidget):
             for _, name, pkg, domain in sorted((c for c in apps.CATALOG if c[0] == cat), key=lambda c: c[1].lower()):
                 row = ActionRow(name, "", self.app_actions(pkg), self, pkg, domain)
                 self.info_rows[pkg] = row
+                cached = self.info_cache.get(pkg)
+                if isinstance(cached, list) and len(cached) == 3 and cached[0]:
+                    row.set_info(*cached)
                 self.info_deferred.append(pkg)
                 self.info_stamp = time.time()
                 bl.addWidget(row)
@@ -5747,6 +5770,7 @@ class Kernel(QWidget):
         base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
         candidates = [
             os.path.join(base, "monitor-helper", "kernel-monitor.exe"),
+            os.path.join(base, "monitor-helper", "out", "kernel-monitor.exe"),  # running from source
             os.path.join(os.environ.get("TEMP", ""), "kernel-monitor-build", "kernel-monitor.exe"),
         ]
         return next((path for path in candidates if os.path.isfile(path)), None)
@@ -6332,26 +6356,27 @@ class Kernel(QWidget):
             row.set_active(is_active(fn))
 
     def closeEvent(self, e):
+        self.hide()  # the window disappears right away; the cleanup below runs after it is gone
         self.revert_display()  # unapplied previews are dropped so they don't outlive the app
         self.save_applied_states()
         if not (self.isMaximized() or self.isFullScreen()):
             self.cfg.win_size = [self.width(), self.height()]
         self.cfg.save()
+        if self.info_dirty:
+            try:
+                with open(self.info_cache_path, "w", encoding="utf-8") as f:
+                    json.dump(self.info_cache, f)
+            except OSError:
+                pass
         if getattr(self, "monitor_started", False):
             self.monitor_stop.set()
             with self.monitor_lock:
                 process = self.monitor_process
             if process is not None and process.poll() is None:
                 try:
-                    process.stdin.close()
-                except (AttributeError, OSError):
+                    process.kill()  # no waiting for the helper to notice a closed pipe: that cost 1-2 s
+                except OSError:
                     pass
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.terminate()
-            if self.monitor_thread is not None:
-                self.monitor_thread.join(timeout=2)
         for j in self.jobs.jobs:
             j.request_cancel()
         super().closeEvent(e)
@@ -6578,10 +6603,19 @@ if __name__ == "__main__":
     _t0 = time.perf_counter()
     w = Kernel()
     _t1 = time.perf_counter()
+    w.start_monitor()  # the sensor helper needs a couple of seconds to start; run it while the UI finishes loading
     w.prewarm_layout()
     _t2 = time.perf_counter()
     w.show()
+    # Warm up the Specifications page in the background so it already has data when it is opened.
+    QTimer.singleShot(300, w.start_specs_scan)
     if os.environ.get("KERNEL_PROFILE"):  # run with KERNEL_PROFILE=1 to see where launch time goes
         print(f"startup: build UI {_t1 - _t0:.2f}s, prewarm layout {_t2 - _t1:.2f}s, show {time.perf_counter() - _t2:.2f}s",
               file=sys.stderr)
-    sys.exit(app.exec())
+    code = app.exec()
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):
+            pass
+    os._exit(code)  # settings are already saved; skips waiting on worker threads and interpreter teardown
