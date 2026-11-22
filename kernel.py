@@ -2566,6 +2566,252 @@ class ClearButton(QAbstractButton):
         p.drawLine(QPointF(c.x() - d, c.y() + d), QPointF(c.x() + d, c.y() - d))
 
 
+class LinkLabel(QLabel):
+    """Plain clickable text: muted, brightens and underlines on hover."""
+    clicked = Signal()
+
+    def __init__(self, text):
+        super().__init__(text)
+        self.setCursor(Qt.PointingHandCursor)
+        self.hot(False)
+
+    def hot(self, on):
+        f = self.font()
+        f.setPixelSize(14)
+        f.setUnderline(on)
+        self.setFont(f)
+        self.setStyleSheet(f"color: {TEXT if on else '#b5b5b5'};")
+
+    def enterEvent(self, e):
+        self.hot(True)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self.hot(False)
+        super().leaveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+
+
+class BadgeIcon(QWidget):
+    """Small static status icon for the result badge, macOS style: a white disc with the mark cut out of it
+    (a check, or an exclamation mark for a failure)."""
+    S = 22
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setFixedSize(self.S, self.S)
+        self.ok = True
+
+    def set_ok(self, ok):
+        self.ok = ok
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, 240))
+        p.drawEllipse(QPointF(self.S / 2, self.S / 2), 9.5, 9.5)
+        p.setPen(QPen(QColor(20, 20, 20), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        if self.ok:
+            p.drawPolyline([QPointF(6.6, 11.4), QPointF(9.7, 14.3), QPointF(15.2, 8.0)])
+        else:
+            p.drawLine(QPointF(11, 6.0), QPointF(11, 12.2))
+            p.drawPoint(QPointF(11, 15.6))
+
+
+class BadgeZoom(QGraphicsEffect):
+    """Draws a widget scaled around its centre and faded: the zoom in / out of the result badge."""
+
+    def __init__(self, parent, k, o):
+        super().__init__(parent)
+        self.k, self.o = k, o
+
+    def set_state(self, k, o):
+        self.k, self.o = k, o
+        self.update()
+
+    def draw(self, painter):
+        offset = QPoint()
+        pm = self.sourcePixmap(Qt.DeviceCoordinates, offset, QGraphicsEffect.NoPad)
+        painter.save()
+        painter.setWorldTransform(QTransform())
+        painter.setRenderHints(QPainter.SmoothPixmapTransform | QPainter.Antialiasing)
+        painter.setOpacity(self.o)
+        c = QPointF(offset.x() + pm.width() / 2, offset.y() + pm.height() / 2)
+        painter.translate(c)
+        painter.scale(self.k, self.k)
+        painter.translate(-c)
+        painter.drawPixmap(offset, pm)
+        painter.restore()
+
+
+class ResultPopup(QWidget):
+    """Badge that zooms in at the top of the window to say an action ran: a status icon, what ran, what
+    happened and a countdown line. It zooms out by itself (it waits while the pointer is on it); the X or Esc
+    closes it sooner and "View log" opens the Activity page."""
+    view_log = Signal()
+    H, GAP, SHOW_MS = 58, 14, 5000
+    IN, OUT = 0.78, 0.92  # scale it grows from / shrinks to
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.failed, self.note = False, ""
+        self.out = False    # zooming out
+        self.k, self.o = 1.0, 0.0  # current scale and opacity
+        self.frac = 1.0     # time left on the countdown line
+        self.ok = True
+        self.zoom = None
+        self.bar = QVariantAnimation(self)
+        self.bar.setDuration(self.SHOW_MS)
+        self.bar.setStartValue(1.0)
+        self.bar.setEndValue(0.0)
+        self.bar.valueChanged.connect(self.tick)
+        self.bar.finished.connect(self.dismiss)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(13, 0, 10, 0)
+        lay.setSpacing(12)
+        self.icon = BadgeIcon(self)
+        lay.addWidget(self.icon)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        col.addStretch()
+        self.title = QLabel("")
+        tf = QFont(self.title.font())
+        tf.setPixelSize(14)
+        tf.setWeight(QFont.DemiBold)
+        self.title.setFont(tf)
+        self.sub = QLabel("")
+        sf = QFont(self.sub.font())
+        sf.setPixelSize(13)
+        self.sub.setFont(sf)
+        self.sub.setStyleSheet(f"color: {MUTED};")
+        col.addWidget(self.title)
+        col.addWidget(self.sub)
+        col.addStretch()
+        lay.addLayout(col)
+        lay.addSpacing(8)
+        link = LinkLabel("View log")
+        link.clicked.connect(self.view_log)
+        lay.addWidget(link)
+        x = ClearButton(self)
+        x.clicked.connect(self.dismiss)
+        lay.addWidget(x)
+        self.setFixedHeight(self.H)
+        self.hide()
+
+    def tick(self, v):
+        self.frac = float(v)
+        self.update()
+
+    def home(self):
+        p = self.parentWidget()
+        self.move((p.width() - self.width()) // 2, TITLEBAR_H + self.GAP)
+
+    def place(self):  # window resized
+        if self.isVisible():
+            self.home()
+
+    def add_line(self, text):
+        text = str(text)
+        if text.startswith("FAILED") and not self.failed:
+            self.failed = True
+            self.note = text[len("FAILED"):].lstrip(": ").split(" (at ")[0]
+
+    def show_text(self, title, sub, ok=True):
+        if self.isVisible() and not self.out and self.o > 0.05:
+            # Already showing something: shrink and fade that one away first, then bring the new one in.
+            self.bar.stop()
+            self.animate(self.k, self.OUT, self.o, 0.0, False, 130, QEasingCurve.InQuad,
+                         lambda: self.reveal(title, sub, ok))
+        else:
+            self.reveal(title, sub, ok)
+
+    def reveal(self, title, sub, ok):
+        room = min(520, self.parentWidget().width() - 48) - 150
+        self.ok = ok
+        self.icon.set_ok(ok)
+        self.title.setText(QFontMetrics(self.title.font()).elidedText(title, Qt.ElideRight, room))
+        self.sub.setText(QFontMetrics(self.sub.font()).elidedText(sub, Qt.ElideRight, room))
+        self.title.setToolTip(title)
+        self.sub.setToolTip(sub)
+        lay = self.layout()
+        lay.invalidate()
+        lay.activate()
+        self.setFixedWidth(lay.sizeHint().width())  # sized from the new text, not the previous one
+        self.bar.stop()
+        self.frac = 1.0
+        self.animate(self.IN, 1.0, 0.0, 1.0, False, 420, QEasingCurve.OutCubic)
+
+    def animate(self, k0, k1, o0, o1, hide, ms, ease, then=None):
+        if self.zoom:
+            self.zoom.stop()
+        self.out = hide
+        fx = BadgeZoom(self, k0, o0)
+        self.setGraphicsEffect(fx)
+        self.home()  # must move before show(): place() skips hidden widgets, which left it at the top-left corner
+        self.show()
+        self.raise_()
+
+        def step(v):
+            v = float(v)
+            self.k, self.o = k0 + (k1 - k0) * v, o0 + (o1 - o0) * v
+            fx.set_state(self.k, self.o)
+
+        anim = QVariantAnimation(self)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setDuration(ms)
+        anim.setEasingCurve(ease)
+        anim.valueChanged.connect(step)
+        anim.finished.connect(lambda: self.done(hide, then))
+        self.zoom = anim
+        anim.start()
+
+    def done(self, hide, then=None):
+        self.setGraphicsEffect(None)
+        self.zoom = None
+        self.out = False
+        if then:
+            then()
+        elif hide:
+            self.hide()
+            self.k, self.o = 1.0, 0.0
+        else:
+            self.bar.start()
+
+    def dismiss(self):
+        if self.isVisible() and not self.out:
+            self.bar.stop()
+            self.animate(self.k, self.OUT, self.o, 0.0, True, 200, QEasingCurve.InCubic)
+
+    def enterEvent(self, e):
+        if self.bar.state() == QVariantAnimation.Running:
+            self.bar.pause()  # stay while the pointer is on it
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        if self.bar.state() == QVariantAnimation.Paused:
+            self.bar.resume()
+        super().leaveEvent(e)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(r, 17, 17)
+        p.fillPath(path, QColor(20, 20, 20, 245))
+        p.setClipPath(path)
+        p.fillRect(QRectF(0, r.bottom() - 1.5, r.width() * self.frac, 2.5), QColor(255, 255, 255, 110))
+        p.setClipping(False)
+        p.setPen(QPen(QColor(255, 255, 255, 26), 1))
+        p.drawPath(path)
+
+
 class SearchDock(QWidget):
     """Search field pinned over the bottom of a scrolling page, frosted over whatever scrolls behind it."""
     H, GAP = 60, 37
@@ -3928,6 +4174,7 @@ class Sidebar(QFrame):
 
 class Kernel(QWidget):
     logged = Signal(str)
+    popup_log = Signal(str)
     found = Signal(list)
     icon_ready = Signal(str, QImage)
     specs_ready = Signal(list, str)
@@ -4119,6 +4366,9 @@ class Kernel(QWidget):
                 EdgeGrip(self, Qt.RightEdge | Qt.TopEdge, Qt.SizeBDiagCursor),
                 EdgeGrip(self, Qt.LeftEdge | Qt.BottomEdge, Qt.SizeBDiagCursor),
                 EdgeGrip(self, Qt.RightEdge | Qt.BottomEdge, Qt.SizeFDiagCursor)]
+        self.result_popup = ResultPopup(self)
+        self.result_popup.view_log.connect(self.open_log)
+        self.popup_log.connect(self.result_popup.add_line)
         self.place_overlay()
 
     def current_scroll_area(self):
@@ -4167,6 +4417,8 @@ class Kernel(QWidget):
     def place_overlay(self):
         w, h = self.width(), self.height()
         self.overlay.setGeometry(0, 0, w, h)
+        if hasattr(self, "result_popup"):
+            self.result_popup.place()
         pw = min(520, w - 48)
         ph = min(600, h - 137)
         shift = TITLEBAR_H - 16 if hasattr(self, "titlebar") else 0
@@ -4251,7 +4503,9 @@ class Kernel(QWidget):
         self.place_overlay()
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Escape and self.overlay.isVisible():
+        if e.key() == Qt.Key_Escape and self.result_popup.isVisible():
+            self.result_popup.dismiss()
+        elif e.key() == Qt.Key_Escape and self.overlay.isVisible():
             self.collapse_downloads()
         else:
             super().keyPressEvent(e)
@@ -4698,7 +4952,7 @@ class Kernel(QWidget):
         if vibrance is not None:
             state["vibrance"] = vibrance
         self.cfg.save()
-        self.logged.emit(f"Applied display settings to {self.display_combo.currentText()}.")
+        self.notify("Display", f"Applied display settings to {self.display_combo.currentText()}.")
 
     def set_refresh_row(self, text, button, enabled, attention=False):
         self.refresh_row.sub.setText(text)
@@ -4729,10 +4983,10 @@ class Kernel(QWidget):
             display_controls.apply_highest_refresh(self.current_display)
         except (display_controls.DisplayError, OSError) as ex:
             self.display_status.setText(f"Could not apply the highest refresh rate: {ex}")
-            self.logged.emit(f"Display refresh-rate change failed: {ex}")
+            self.notify("Display", f"Display refresh-rate change failed: {ex}")
             return
         self.refresh_display_status()
-        self.logged.emit(f"Applied the highest refresh rate available for {self.display_combo.currentText()}.")
+        self.notify("Display", f"Applied the highest refresh rate available for {self.display_combo.currentText()}.")
 
     @staticmethod
     def vibrance_text(value):
@@ -6212,32 +6466,59 @@ class Kernel(QWidget):
         if not operations or (self.tweak_job and self.tweak_job.active):
             return
         self.tweak_operation_fns = {fn for _, fn, _ in operations}
-        self.goto(ACTIVITY)
+        names = [name for name, _, _ in operations]
+        title = ", ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
+        self.tweak_title = title
+        targets = {target for _, _, target in operations}
+        self.show_result(title, "Applied" if targets == {True} else "Reverted" if targets == {False} else "Done")
 
         def work(job):
+            def log(msg):  # the Activity log as before, plus the popup
+                job.log(msg)
+                self.popup_log.emit(str(msg))
             for name, fn, target in operations:
-                job.log(f"== {'Apply ' if target else 'Revert '}{name}")
+                log(f"== {'Apply ' if target else 'Revert '}{name}")
                 try:
                     if is_active(fn) == target:
-                        job.log(f"Skipped {name}: already {'active' if target else 'inactive'}.")
+                        log(f"Skipped {name}: already {'active' if target else 'inactive'}.")
                     elif not target:
-                        revert_tweak(fn, job.log)
+                        revert_tweak(fn, log)
                     else:
-                        fn(job.log)
+                        fn(log)
                 except Exception as e:
                     tb = e.__traceback__
                     while tb.tb_next:
                         tb = tb.tb_next
-                    job.log(f"FAILED: {e} (at {os.path.basename(tb.tb_frame.f_code.co_filename)}:"
-                            f"{tb.tb_lineno} in {tb.tb_frame.f_code.co_name})")
-            job.log("Done.")
+                    log(f"FAILED: {e} (at {os.path.basename(tb.tb_frame.f_code.co_filename)}:"
+                        f"{tb.tb_lineno} in {tb.tb_frame.f_code.co_name})")
+            log("Done.")
             return True
         self.tweak_job = Job("Tweaks", "task", fn=work, hidden=True)
         self.tweak_job.changed.connect(self.tweaks_changed)
         self.jobs.submit(self.tweak_job)
 
+    def show_result(self, title, sub, ok=True):
+        """Slide the result badge in at the top of the window (the old behaviour was to jump to Activity)."""
+        self.result_popup.failed, self.result_popup.note = False, ""
+        self.result_popup.show_text(title, sub, ok)
+        self.raise_chrome()
+
+    def notify(self, title, text):
+        """An instant result (applied / failed): logged as before and shown in the result card."""
+        self.logged.emit(text)
+        self.show_result(title, text, "failed" not in text.lower())
+
+    def open_log(self):
+        self.result_popup.dismiss()
+        self.goto(ACTIVITY)
+
     def tweaks_changed(self):
         if self.tweak_job and not self.tweak_job.active:
+            if getattr(self, "tweak_title", None) is not None:
+                if self.result_popup.failed:  # the one case the badge changes (and shows again)
+                    note = self.result_popup.note
+                    self.result_popup.show_text(self.tweak_title, f"Failed: {note}" if note else "Something went wrong", False)
+                self.tweak_title = None
             self.refresh_tweak_rows()
             self.save_applied_states()
             self.cfg.save()
