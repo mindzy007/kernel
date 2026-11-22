@@ -51,6 +51,8 @@ Name: "pawnio"; Description: "Install the PawnIO driver (needed for CPU temperat
 Filename: "{tmp}\PawnIO_setup.exe"; Parameters: "-install -silent"; StatusMsg: "Installing the PawnIO driver..."; Flags: waituntilterminated runhidden; Tasks: pawnio; Check: not PawnIOInstalled
 #endif
 Filename: "{app}\Kernel.exe"; Description: "Launch Kernel"; Flags: shellexec nowait postinstall skipifsilent
+; Optional and unticked: a checkbox on the last page that opens the Ko-fi page in the browser.
+Filename: "https://ko-fi.com/mindzy"; Description: "Support Kernel's development on Ko-fi (optional)"; Flags: shellexec nowait postinstall skipifsilent unchecked
 
 [Code]
 { True when PawnIO is properly installed on this PC: its own uninstall entry exists. Its driver service key can
@@ -59,4 +61,13 @@ Filename: "{app}\Kernel.exe"; Description: "Launch Kernel"; Flags: shellexec now
 function PawnIOInstalled: Boolean;
 begin
   Result := RegKeyExists(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO');
+end;
+
+{ Inno draws the welcome/finished headings in Verdana and everything else in the system font, so the text visibly
+  changes typeface from page to page. Setting it all to Segoe UI before the wizard is shown keeps one font throughout. }
+procedure InitializeWizard;
+begin
+  WizardForm.Font.Name := 'Segoe UI';
+  WizardForm.WelcomeLabel1.Font.Name := 'Segoe UI';
+  WizardForm.FinishedHeadingLabel.Font.Name := 'Segoe UI';
 end;

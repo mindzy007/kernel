@@ -2687,10 +2687,8 @@ class ResultPopup(Panel):
         self.tick.setInterval(40)
         self.tick.timeout.connect(self.live)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(13, 0, 10, 0)
+        lay.setContentsMargins(20, 0, 10, 0)
         lay.setSpacing(12)
-        self.icon = BadgeIcon(self)
-        lay.addWidget(self.icon)
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addStretch()
@@ -2778,7 +2776,6 @@ class ResultPopup(Panel):
     def reveal(self, title, sub, ok):
         room = min(520, self.parentWidget().width() - 48) - 150
         self.ok = ok
-        self.icon.set_ok(ok)
         self.title.setText(QFontMetrics(self.title.font()).elidedText(title, Qt.ElideRight, room))
         self.sub.setText(QFontMetrics(self.sub.font()).elidedText(sub, Qt.ElideRight, room))
         self.title.setToolTip(title)
