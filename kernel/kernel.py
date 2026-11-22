@@ -2789,7 +2789,7 @@ class ResultPopup(Panel):
         self.setFixedWidth(lay.sizeHint().width())  # sized from the new text, not the previous one
         self.snap()
         self.bar.stop()
-        self.animate(self.IN, 1.0, 0.0, 1.0, False, 420, QEasingCurve.OutCubic)
+        self.animate(self.IN, 1.0, 0.0, 1.0, False, 300, QEasingCurve.OutQuint)
 
     def animate(self, k0, k1, o0, o1, hide, ms, ease, then=None):
         if self.zoom:
@@ -2800,7 +2800,7 @@ class ResultPopup(Panel):
         self.home()  # must move before show(): place() skips hidden widgets, which left it at the top-left corner
         self.show()
         self.raise_()
-        self.tick.start()
+        self.tick.stop()  # no page re-capture while it animates: it made the zoom stutter
 
         def step(v):
             v = float(v)
@@ -2829,6 +2829,7 @@ class ResultPopup(Panel):
             self.k, self.o = 1.0, 0.0
         else:
             self.bar.start()
+            self.tick.start()  # live blur resumes once it is at rest
 
     def dismiss(self):
         if self.isVisible() and not self.out:
