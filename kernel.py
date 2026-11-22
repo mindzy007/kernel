@@ -2478,10 +2478,12 @@ class FlatLabel(QLabel):
 
 class Panel(QFrame):
     """Frosted-glass panel: paints a blurred copy of what is behind it, tinted dark."""
+    TINT, WASH = 150, 0  # dark tint alpha; faint white wash alpha (lets the blur read as glass)
 
     def __init__(self, parent):
         super().__init__(parent)
         self.bg = None
+        self.bg_src = None  # set: draw exactly this part of bg (instead of mapping from window coordinates)
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -2494,14 +2496,18 @@ class Panel(QFrame):
         # stack another tinted layer on top of the old one and leave dark boxes behind.
         p.setCompositionMode(QPainter.CompositionMode_Source)
         p.fillPath(path, QColor(BG))
-        if self.bg:
+        if self.bg and self.bg_src is not None:
+            p.drawPixmap(QRectF(self.rect()), self.bg, self.bg_src)
+        elif self.bg:
             k = self.bg.width() / max(self.window().width(), 1)
             g = self.geometry()
             p.drawPixmap(QRectF(self.rect()), self.bg, QRectF(g.x() * k, g.y() * k, g.width() * k, g.height() * k))
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
-        p.fillPath(path, QColor(18, 18, 18, 150))
+        p.fillPath(path, QColor(14, 14, 14, self.TINT))
+        if self.WASH:
+            p.fillPath(path, QColor(255, 255, 255, self.WASH))
         p.setClipping(False)
-        p.setPen(QPen(QColor(255, 255, 255, 14), 1))
+        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
         p.drawPath(path)
 
 
@@ -2655,7 +2661,8 @@ class ResultPopup(Panel):
     closes it sooner and "View log" opens the Activity page."""
     view_log = Signal()
     H, GAP, SHOW_MS = 56, 14, 2500
-    IN, OUT = 0.78, 0.92  # scale it grows from / shrinks to
+    IN, OUT = 0.6, 0.92  # scale it grows from / shrinks to
+    TINT, WASH = 100, 7  # dark tint over the blur; white wash makes it a touch brighter than the app
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -2668,6 +2675,9 @@ class ResultPopup(Panel):
         self.bar.setSingleShot(True)
         self.bar.setInterval(self.SHOW_MS)
         self.bar.timeout.connect(self.dismiss)
+        self.tick = QTimer(self)  # re-blurs the page behind the badge while it is up, so it follows scrolling
+        self.tick.setInterval(40)
+        self.tick.timeout.connect(self.live)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(13, 0, 10, 0)
         lay.setSpacing(12)
@@ -2701,9 +2711,38 @@ class ResultPopup(Panel):
         self.hide()
 
     def snap(self):
-        """Blur the window behind the badge, exactly like the Downloads panel (Panel paints its own part of it)."""
-        self.hide()  # keep the badge itself out of the snapshot
-        self.bg = blurred(self.parentWidget().grab())
+        """Blur the page content behind the badge. Same method as the Downloads pill and the search dock: grab the
+        page (a window grab has a transparent background, so the blur of it came out as flat dark)."""
+        win = self.parentWidget()
+        self.bg, self.bg_src = None, None
+        cur = win.stack.currentWidget()
+        page = cur if isinstance(cur, QScrollArea) else cur.findChild(QScrollArea)
+        if page is None:
+            return
+        g = QRect((win.width() - self.width()) // 2, TITLEBAR_H + self.GAP, self.width(), self.height())
+        m = 24
+        area = QRect(page.mapTo(win, QPoint(0, 0)), page.size())
+        region = g.adjusted(-m, -m, m, m) & area
+        if region.isEmpty():
+            return
+        shot = page.grab(QRect(page.mapFrom(win, region.topLeft()), region.size()))
+        if shot.isNull():
+            return
+        shot.setDevicePixelRatio(1.0)
+        pm = blurred(shot, radius=18)
+        k = pm.width() / region.width()
+        off = g.topLeft() - region.topLeft()
+        self.bg = pm
+        self.bg_src = QRectF(off.x() * k, off.y() * k, g.width() * k, g.height() * k)
+
+    def live(self):
+        if not self.isVisible():
+            self.tick.stop()
+            return
+        if WindowState.moving:
+            return
+        self.snap()
+        self.update()
 
     def home(self):
         p = self.parentWidget()
@@ -2753,6 +2792,7 @@ class ResultPopup(Panel):
         self.home()  # must move before show(): place() skips hidden widgets, which left it at the top-left corner
         self.show()
         self.raise_()
+        self.tick.start()
 
         def step(v):
             v = float(v)
@@ -2776,6 +2816,7 @@ class ResultPopup(Panel):
         if then:
             then()
         elif hide:
+            self.tick.stop()
             self.hide()
             self.k, self.o = 1.0, 0.0
         else:
