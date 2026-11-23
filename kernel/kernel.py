@@ -6,8 +6,10 @@ import json
 import math
 import os
 import queue
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -1173,6 +1175,32 @@ class PathChip(QWidget):
             p.setPen(QColor(g, g, g))
             p.drawText(QRectF(x, 0, room, self.height()), Qt.AlignVCenter | Qt.AlignLeft,
                        self.fm.elidedText(self.path, Qt.ElideMiddle, room))
+
+
+class UpdateBar(QWidget):
+    """Thin rounded progress line shown under the version while an update downloads."""
+    W, H, LINE = 280, 11, 4
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedSize(self.W, self.H)
+        self.value = 0.0
+
+    def set_value(self, v):
+        self.value = max(0.0, min(1.0, float(v)))
+        self.update()
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        y = self.H - self.LINE
+        r = self.LINE / 2
+        p.setBrush(QColor(255, 255, 255, 26))
+        p.drawRoundedRect(QRectF(0, y, self.W, self.LINE), r, r)
+        if self.value > 0:
+            p.setBrush(QColor("#ffb454"))
+            p.drawRoundedRect(QRectF(0, y, max(self.W * self.value, self.LINE), self.LINE), r, r)
 
 
 class Row(HoverFrame):
@@ -6134,11 +6162,16 @@ class Kernel(QWidget):
         self.update_job = None
         self.update_serial, self.update_pending = 0, False
         self.about_row = Row("Kernel", f"Version {VERSION}")
-        self.update_download = Button("Download")
+        self.update_installs = bool(getattr(sys, "frozen", False))  # packaged app: update in place; from source: just download
+        self.update_label = "Update" if self.update_installs else "Download"
+        self.update_download = Button(self.update_label)
         self.update_download.clicked.connect(self.on_update_download_clicked)
         self.update_download.hide()
         self.update_button = Button("Check for updates")
         self.update_button.clicked.connect(self.check_for_updates)
+        self.update_bar = UpdateBar()
+        self.update_bar.hide()
+        self.about_row.text_col.addWidget(self.update_bar, 0, Qt.AlignLeft)
         self.about_row.right.addWidget(self.update_download)
         if DONATE_URL:  # donating lives next to the update check: one tidy About row
             self.donate_button = Button("Donate")
@@ -6232,16 +6265,23 @@ class Kernel(QWidget):
             self.update_checked.emit(serial, "", "", "none" if none and not error else (error or "failed"))
 
     def on_update_download_clicked(self):
-        if self.update_file and os.path.isfile(self.update_file):
+        if not self.update_installs and self.update_file and os.path.isfile(self.update_file):
             subprocess.Popen(["explorer", "/select,", os.path.normpath(self.update_file)])
             return
         self.download_update()
 
+    def update_kind(self):
+        """"setup" for an installed copy (it has an uninstaller beside it), "portable" for the single-file exe."""
+        if self.update_installs and not os.path.isfile(os.path.join(os.path.dirname(sys.executable), "unins000.exe")):
+            return "portable"
+        return "setup"
+
     def resolve_update_asset(self, tag):
-        """(url, file name, size) of the installer attached to a release."""
+        """(url, file name, size) of the release file that matches this copy of the app."""
         import urllib.request
         from urllib.parse import quote
-        name = f"Kernel-Setup-{tag.lstrip('vV')}.exe"
+        kind = self.update_kind()
+        name = f"Kernel-{'Portable' if kind == 'portable' else 'Setup'}-{tag.lstrip('vV')}.exe"
         guess = (f"https://github.com/{UPDATE_REPO}/releases/download/{quote(tag)}/{name}", name, 0)
         try:
             req = urllib.request.Request(
@@ -6249,10 +6289,12 @@ class Kernel(QWidget):
                 headers={**self.UPDATE_HEADERS, "Accept": "application/vnd.github+json"})
             with apps._open(req, 8) as r:
                 data = json.loads(r.read().decode("utf-8"))
-            for a in data.get("assets", []):
-                n = os.path.basename(str(a.get("name", "")))
-                if n.lower().endswith(".exe") and a.get("browser_download_url"):
-                    return a["browser_download_url"], n, int(a.get("size") or 0)
+            exes = [a for a in data.get("assets", [])
+                    if str(a.get("name", "")).lower().endswith(".exe") and a.get("browser_download_url")]
+            exes.sort(key=lambda a: kind not in str(a.get("name", "")).lower())  # the matching kind first
+            if exes:
+                a = exes[0]
+                return a["browser_download_url"], os.path.basename(str(a["name"])), int(a.get("size") or 0)
         except Exception:
             pass
         return guess
@@ -6265,7 +6307,7 @@ class Kernel(QWidget):
         def work(job):
             import urllib.request
             url, name, total = self.resolve_update_asset(tag)
-            folder = self.cfg.download_dir
+            folder = os.path.join(tempfile.gettempdir(), "kernel-update") if self.update_installs else self.cfg.download_dir
             os.makedirs(folder, exist_ok=True)
             dest = os.path.join(folder, name)
             part = dest + ".part"
@@ -6297,6 +6339,8 @@ class Kernel(QWidget):
         self.update_job = job
         job.changed.connect(self.on_update_job_changed)  # bound method: runs on the UI thread
         self.update_download.setEnabled(False)
+        self.update_bar.set_value(0)
+        self.update_bar.setVisible(self.update_installs)
         self.set_update_status("Downloading update...", "#ffb454")
         self.jobs.submit(job, parallel=True)
 
@@ -6306,16 +6350,56 @@ class Kernel(QWidget):
     def show_update_download(self, job):
         if job.state in ("queued", "running"):
             pct = f" {int(job.progress * 100)}%" if job.progress >= 0 else "..."
+            if job.progress >= 0:
+                self.update_bar.set_value(job.progress)
             self.set_update_status(f"Downloading update{pct}", "#ffb454")
+        elif job.state == "done" and self.update_installs:
+            self.update_bar.set_value(1)
+            self.apply_update(job.path)
         elif job.state == "done":
             self.update_file = job.path
             self.update_download.setText("Show file")
             self.update_download.setEnabled(True)
             self.set_update_status(f"Update downloaded: {os.path.basename(job.path)}", "#4fd08a")
         else:
-            self.update_download.setText("Download")
+            self.update_bar.hide()
+            self.update_download.setText(self.update_label)
             self.update_download.setEnabled(True)
             self.set_update_status("Download failed, try again", "#ffb454")
+
+    def apply_update(self, path):
+        """Replace the running app with the downloaded one and restart it."""
+        flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: outlives this process
+        self.set_update_status("Installing update, Kernel will restart", "#4fd08a")
+        try:
+            if self.update_kind() == "setup":
+                # the installer closes and replaces the app, then starts it again (see [Run] in kernel.iss)
+                subprocess.Popen([path, "/VERYSILENT", "/NORESTART", "/NORESTARTAPPLICATIONS", "/SUPPRESSMSGBOXES"],
+                                 creationflags=flags, close_fds=True)
+            else:
+                exe = sys.executable
+                folder = os.path.dirname(exe)
+                new_exe = os.path.join(folder, os.path.basename(path))
+                old = exe + ".old"
+                if os.path.exists(old):
+                    os.remove(old)
+                os.replace(exe, old)  # a running exe can be renamed, just not overwritten
+                try:
+                    shutil.move(path, new_exe)
+                except Exception:
+                    os.replace(old, exe)
+                    raise
+                subprocess.Popen([new_exe], cwd=folder, creationflags=flags, close_fds=True)
+                subprocess.Popen(f'ping -n 8 127.0.0.1 >nul & del /f /q "{old}"', shell=True,
+                                 creationflags=flags | 0x08000000, close_fds=True)
+        except Exception as e:
+            self.logged.emit(f"Update could not be installed: {e}")
+            self.update_bar.hide()
+            self.update_download.setText(self.update_label)
+            self.update_download.setEnabled(True)
+            self.set_update_status("Couldn't install the update, try again", "#ffb454")
+            return
+        QTimer.singleShot(400, self.close)
 
     def set_update_status(self, text, color=""):
         self.about_row.sub.setStyleSheet(f"color: {color};" if color else "")
@@ -6338,7 +6422,7 @@ class Kernel(QWidget):
             self.set_update_status("Couldn't reach the update server, try again")
         elif version_tuple(tag) > version_tuple(VERSION):
             self.update_url, self.update_tag, self.update_file = url, tag, ""
-            self.update_download.setText("Download")
+            self.update_download.setText(self.update_label)
             self.update_download.setEnabled(True)
             self.set_update_status(f"Update available: {tag.lstrip('vV')}", "#ffb454")
             self.update_download.show()

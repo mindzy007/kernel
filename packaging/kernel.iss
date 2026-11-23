@@ -51,6 +51,8 @@ Name: "pawnio"; Description: "Install the PawnIO driver (needed for CPU temperat
 Filename: "{tmp}\PawnIO_setup.exe"; Parameters: "-install -silent"; StatusMsg: "Installing the PawnIO driver..."; Flags: waituntilterminated runhidden; Tasks: pawnio; Check: not PawnIOInstalled
 #endif
 Filename: "{app}\Kernel.exe"; Description: "Launch Kernel"; Flags: shellexec nowait postinstall skipifsilent
+; In-app updates run the installer silently: start the new version when it finishes.
+Filename: "{app}\Kernel.exe"; Flags: shellexec nowait; Check: WizardSilent
 ; Optional and unticked: a checkbox on the last page that opens the Ko-fi page in the browser.
 Filename: "https://ko-fi.com/mindzy"; Description: "Support Kernel's development on Ko-fi (optional)"; Flags: shellexec nowait postinstall skipifsilent unchecked
 
