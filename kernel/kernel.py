@@ -1059,14 +1059,6 @@ class SpecRow(HoverFrame):
         QTimer.singleShot(1200, restore)
 
 
-def version_tuple(v):
-    parts = []
-    for p in str(v).lstrip("vV").split("."):
-        digits = "".join(ch for ch in p if ch.isdigit())
-        parts.append(int(digits) if digits else 0)
-    return tuple(parts)
-
-
 # Fixed gap between a row's text and its buttons; the text column takes whatever width is left,
 # so the gap stays the same at every window size.
 ROW_TEXT_GAP = 48
@@ -6243,7 +6235,8 @@ class Kernel(QWidget):
     UPDATE_HEADERS = {"User-Agent": "Kernel-Updater", "Cache-Control": "no-cache", "Pragma": "no-cache"}
 
     def latest_from_redirect(self):
-        # github.com/<repo>/releases/latest redirects to the newest tag; no API rate limit
+        # fallback if the API is rate limited: github.com/<repo>/releases/latest redirects to the newest
+        # stable release (pre-releases are skipped by GitHub here)
         import urllib.request
         from urllib.parse import unquote
         req = urllib.request.Request(
@@ -6256,25 +6249,27 @@ class Kernel(QWidget):
         return unquote(final.rsplit("/releases/tag/", 1)[1].split("?")[0])
 
     def latest_from_api(self):
-        # newest tag across ALL published releases, so a stale "Latest" badge can't hide a newer one
+        # the most recently PUBLISHED release, pre-releases included. Tags are not compared by number: the
+        # version scheme has changed before, and an old high number must not hide the newest release.
         import urllib.request
         req = urllib.request.Request(
             f"https://api.github.com/repos/{UPDATE_REPO}/releases?per_page=30",
             headers={**self.UPDATE_HEADERS, "Accept": "application/vnd.github+json"})
         with apps._open(req, 5) as r:
             data = json.loads(r.read().decode("utf-8"))
-        tags = [str(x.get("tag_name", "")) for x in data if not x.get("draft") and not x.get("prerelease")]
-        tags = [t for t in tags if t]
-        if not tags:
+        releases = [x for x in data if not x.get("draft") and x.get("tag_name")]
+        if not releases:
             raise LookupError("none")
-        return max(tags, key=version_tuple)
+        newest = max(releases, key=lambda x: str(x.get("published_at") or x.get("created_at") or ""))
+        return str(newest["tag_name"])
 
     def fetch_latest_release(self, serial):
         tags, error, none = [], "", False
         for _ in range(2):  # retry once; networks time out now and then
-            for method in (self.latest_from_redirect, self.latest_from_api):
+            for method in (self.latest_from_api, self.latest_from_redirect):
                 try:
                     tags.append(method())
+                    break
                 except LookupError:
                     none = True
                 except Exception as ex:
@@ -6282,7 +6277,7 @@ class Kernel(QWidget):
             if tags:
                 break
         if tags:
-            tag = max(tags, key=version_tuple)  # newest answer wins
+            tag = tags[0]
             self.update_checked.emit(serial, tag, f"https://github.com/{UPDATE_REPO}/releases/tag/{tag}", "")
         else:
             self.update_checked.emit(serial, "", "", "none" if none and not error else (error or "failed"))
@@ -6443,7 +6438,7 @@ class Kernel(QWidget):
             self.set_update_status("No release published yet")
         elif error or not tag:
             self.set_update_status("Couldn't reach the update server, try again")
-        elif version_tuple(tag) > version_tuple(VERSION):
+        elif tag.lstrip("vV").lower() != VERSION.lstrip("vV").lower():  # any different release is an update
             self.update_url, self.update_tag, self.update_file = url, tag, ""
             self.update_download.setText(self.update_label)
             self.update_download.setEnabled(True)

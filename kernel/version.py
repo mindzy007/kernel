@@ -1,2 +1,2 @@
-VERSION = "26.2.2"
+VERSION = "26.2.21"
 UPDATE_REPO = "mindzy007/kernel"
