@@ -2608,33 +2608,56 @@ class ClearButton(QAbstractButton):
         p.drawLine(QPointF(c.x() - d, c.y() + d), QPointF(c.x() + d, c.y() - d))
 
 
-class LinkLabel(QLabel):
-    """Plain clickable text: muted, brightens and underlines on hover."""
-    clicked = Signal()
+class PillLink(QAbstractButton):
+    """Quiet pill-shaped text button: a faint fill that lightens on hover."""
+    H = 28
 
     def __init__(self, text):
-        super().__init__(text)
+        super().__init__()
+        self.setText(text)
         self.setCursor(Qt.PointingHandCursor)
-        self.hot(False)
-
-    def hot(self, on):
-        f = self.font()
-        f.setPixelSize(14)
-        f.setUnderline(on)
+        self.setFocusPolicy(Qt.NoFocus)
+        f = QFont(self.font())
+        f.setPixelSize(13)
         self.setFont(f)
-        self.setStyleSheet(f"color: {TEXT if on else '#b5b5b5'};")
+        self.setFixedSize(QFontMetrics(f).horizontalAdvance(text) + 28, self.H)
+        self._hover = 0.0
+        self.anim = QPropertyAnimation(self, b"hover", self)
+        self.anim.setEasingCurve(QEasingCurve.InOutSine)
+
+    def get_hover(self):
+        return self._hover
+
+    def set_hover(self, v):
+        self._hover = v
+        self.update()
+
+    hover = Property(float, get_hover, set_hover)
+
+    def glide(self, end):
+        self.anim.stop()
+        self.anim.setDuration(160)
+        self.anim.setStartValue(self._hover)
+        self.anim.setEndValue(end)
+        self.anim.start()
 
     def enterEvent(self, e):
-        self.hot(True)
+        self.glide(1.0)
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self.hot(False)
+        self.glide(0.0)
         super().leaveEvent(e)
 
-    def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
-            self.clicked.emit()
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, int(16 + 20 * self._hover)))
+        p.drawRoundedRect(QRectF(self.rect()), self.H / 2, self.H / 2)
+        shade = int(200 + 45 * self._hover)
+        p.setPen(QColor(shade, shade, shade))
+        p.drawText(self.rect(), Qt.AlignCenter, self.text())
 
 
 class SystemIcon(QWidget):
@@ -2664,7 +2687,7 @@ class SystemIcon(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 250))
+        p.setBrush(QColor(255, 255, 255, 165))  # dimmed: the icon supports the text, it should not shout
         p.drawPath(self.tri)
         p.setBrush(QColor(14, 14, 14))
         p.drawRoundedRect(self.stem, 1.1, 1.1)
@@ -2722,8 +2745,8 @@ class ResultPopup(Panel):
         self.tick.setInterval(40)
         self.tick.timeout.connect(self.live)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(18, 0, 14, 0)
-        lay.setSpacing(13)
+        lay.setContentsMargins(22, 0, 14, 0)
+        lay.setSpacing(14)
         self.icon = SystemIcon(self)
         lay.addWidget(self.icon)
         col = QVBoxLayout()
@@ -2743,8 +2766,8 @@ class ResultPopup(Panel):
         col.addWidget(self.sub)
         col.addStretch()
         lay.addLayout(col)
-        lay.addSpacing(18)
-        link = LinkLabel("View log")
+        lay.addSpacing(24)
+        link = PillLink("View log")
         link.clicked.connect(self.view_log)
         lay.addWidget(link)
         x = ClearButton(self)
@@ -2853,7 +2876,7 @@ class ResultPopup(Panel):
             self.reveal(title, sub, ok)
 
     def reveal(self, title, sub, ok):
-        room = min(520, self.parentWidget().width() - 48) - 175
+        room = min(520, self.parentWidget().width() - 48) - 210
         self.ok = ok
         self.title.setText(QFontMetrics(self.title.font()).elidedText(title, Qt.ElideRight, room))
         self.sub.setText(QFontMetrics(self.sub.font()).elidedText(sub, Qt.ElideRight, room))
