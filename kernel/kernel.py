@@ -595,7 +595,7 @@ class NavButton(AnimButton):
         QPushButton.leaveEvent(self, e)
 
     def mouseMoveEvent(self, e):
-        QPushButton.mouseMoveEvent(self, e)  # no cursor-follow animation needed any more
+        QPushButton.mouseMoveEvent(self, e)
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -606,7 +606,7 @@ class NavButton(AnimButton):
         path.addRoundedRect(r, 10, 10)
         fade = h * (1 - s)  # hover shows only on items that are not selected (the sidebar draws the selected one)
         if fade > 0.01:
-            p.fillPath(path, QColor(255, 255, 255, int(9 * fade)))  # plain soft wash, no border
+            p.fillPath(path, QColor(255, 255, 255, int(9 * fade)))
         t = max(s, h * 0.75)
         c = QColor(int(lerp(122, 255, t)), int(lerp(122, 255, t)), int(lerp(122, 255, t)))
         p.setPen(c)
@@ -2609,32 +2609,38 @@ class LinkLabel(QLabel):
             self.clicked.emit()
 
 
-class BadgeIcon(QWidget):
-    """Small static status icon for the result badge, macOS style: a white disc with the mark cut out of it
-    (a check, or an exclamation mark for a failure)."""
+class SystemIcon(QWidget):
+    """Small static alert icon for the result badge: a solid white triangle with softly rounded corners and a
+    dark exclamation mark. Everything is a filled shape (no thick strokes), so the edges stay crisp."""
     S = 22
 
     def __init__(self, parent):
         super().__init__(parent)
         self.setFixedSize(self.S, self.S)
-        self.ok = True
-
-    def set_ok(self, ok):
-        self.ok = ok
-        self.update()
+        corners, r = [(11.0, 2.4), (20.6, 19.2), (1.4, 19.2)], 2.3
+        tri = QPainterPath()
+        for i, (x, y) in enumerate(corners):
+            px, py = corners[i - 1]
+            nx, ny = corners[(i + 1) % 3]
+            a, b = math.hypot(px - x, py - y), math.hypot(nx - x, ny - y)
+            start = QPointF(x + (px - x) / a * r, y + (py - y) / a * r)
+            end = QPointF(x + (nx - x) / b * r, y + (ny - y) / b * r)
+            tri.moveTo(start) if i == 0 else tri.lineTo(start)
+            tri.quadTo(QPointF(x, y), end)
+        tri.closeSubpath()
+        self.tri = tri
+        self.stem = QRectF(9.9, 7.4, 2.2, 6.0)
+        self.dot = QPointF(11.0, 16.2)
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 240))
-        p.drawEllipse(QPointF(self.S / 2, self.S / 2), 9.5, 9.5)
-        p.setPen(QPen(QColor(20, 20, 20), 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        if self.ok:
-            p.drawPolyline([QPointF(6.6, 11.4), QPointF(9.7, 14.3), QPointF(15.2, 8.0)])
-        else:
-            p.drawLine(QPointF(11, 6.0), QPointF(11, 12.2))
-            p.drawPoint(QPointF(11, 15.6))
+        p.setBrush(QColor(255, 255, 255, 250))
+        p.drawPath(self.tri)
+        p.setBrush(QColor(14, 14, 14))
+        p.drawRoundedRect(self.stem, 1.1, 1.1)
+        p.drawEllipse(self.dot, 1.25, 1.25)
 
 
 class BadgeZoom(QGraphicsEffect):
@@ -2675,6 +2681,7 @@ class ResultPopup(Panel):
     def __init__(self, parent):
         super().__init__(parent)
         self.failed, self.note = False, ""
+        self.glass = None   # finished picture of the blurred glass (see build_glass)
         self.out = False    # zooming out
         self.k, self.o = 1.0, 0.0  # current scale and opacity
         self.ok = True
@@ -2687,8 +2694,10 @@ class ResultPopup(Panel):
         self.tick.setInterval(40)
         self.tick.timeout.connect(self.live)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 0, 10, 0)
-        lay.setSpacing(12)
+        lay.setContentsMargins(18, 0, 14, 0)
+        lay.setSpacing(13)
+        self.icon = SystemIcon(self)
+        lay.addWidget(self.icon)
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addStretch()
@@ -2706,7 +2715,7 @@ class ResultPopup(Panel):
         col.addWidget(self.sub)
         col.addStretch()
         lay.addLayout(col)
-        lay.addSpacing(8)
+        lay.addSpacing(18)
         link = LinkLabel("View log")
         link.clicked.connect(self.view_log)
         lay.addWidget(link)
@@ -2720,7 +2729,7 @@ class ResultPopup(Panel):
         """Blur the page content behind the badge. Same method as the Downloads pill and the search dock: grab the
         page (a window grab has a transparent background, so the blur of it came out as flat dark)."""
         win = self.parentWidget()
-        self.bg, self.bg_src = None, None
+        self.bg, self.bg_src, self.glass = None, None, None
         cur = win.stack.currentWidget()
         page = cur if isinstance(cur, QScrollArea) else cur.findChild(QScrollArea)
         if page is None:
@@ -2740,6 +2749,48 @@ class ResultPopup(Panel):
         off = g.topLeft() - region.topLeft()
         self.bg = pm
         self.bg_src = QRectF(off.x() * k, off.y() * k, g.width() * k, g.height() * k)
+        self.build_glass()
+
+    def build_glass(self):
+        """Compose blur + tint + rounded corners into one picture. The zoom effect then animates a finished
+        picture instead of repainting the glass on every frame, so the blur is there from the first frame."""
+        dpr = self.devicePixelRatioF()
+        w, h = self.width(), self.height()
+        img = QImage(max(int(w * dpr), 1), max(int(h * dpr), 1), QImage.Format_ARGB32_Premultiplied)
+        img.setDevicePixelRatio(dpr)
+        img.fill(QColor(BG))
+        p = QPainter(img)
+        p.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
+        full = QRectF(0, 0, w, h)
+        p.drawPixmap(full, self.bg, self.bg_src)
+        p.fillRect(full, QColor(14, 14, 14, self.TINT))
+        if self.WASH:
+            p.fillRect(full, QColor(255, 255, 255, self.WASH))
+        path = QPainterPath()
+        path.addRoundedRect(full.adjusted(0.5, 0.5, -0.5, -0.5), 18, 18)
+        # Cut the corners once, anti-aliased. The mask must cover the whole picture: DestinationIn only changes
+        # pixels the drawn shape touches, so filling just the rounded path would leave the corners opaque (a box).
+        mask = QImage(img.size(), QImage.Format_ARGB32_Premultiplied)
+        mask.setDevicePixelRatio(dpr)
+        mask.fill(Qt.transparent)
+        mp = QPainter(mask)
+        mp.setRenderHint(QPainter.Antialiasing)
+        mp.fillPath(path, QColor(0, 0, 0, 255))
+        mp.end()
+        p.setCompositionMode(QPainter.CompositionMode_DestinationIn)
+        p.drawImage(0, 0, mask)
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        p.drawPath(path)
+        p.end()
+        self.glass = img
+
+    def paintEvent(self, e):
+        if self.glass is None:
+            super().paintEvent(e)
+            return
+        QPainter(self).drawImage(0, 0, self.glass)
 
     def live(self):
         if not self.isVisible():
@@ -2774,7 +2825,7 @@ class ResultPopup(Panel):
             self.reveal(title, sub, ok)
 
     def reveal(self, title, sub, ok):
-        room = min(520, self.parentWidget().width() - 48) - 150
+        room = min(520, self.parentWidget().width() - 48) - 175
         self.ok = ok
         self.title.setText(QFontMetrics(self.title.font()).elidedText(title, Qt.ElideRight, room))
         self.sub.setText(QFontMetrics(self.sub.font()).elidedText(sub, Qt.ElideRight, room))
@@ -2786,7 +2837,7 @@ class ResultPopup(Panel):
         self.setFixedWidth(lay.sizeHint().width())  # sized from the new text, not the previous one
         self.snap()
         self.bar.stop()
-        self.animate(self.IN, 1.0, 0.0, 1.0, False, 300, QEasingCurve.OutQuint)
+        self.animate(self.IN, 1.0, 0.0, 1.0, False, 340, QEasingCurve.OutQuint)
 
     def animate(self, k0, k1, o0, o1, hide, ms, ease, then=None):
         if self.zoom:
@@ -2799,18 +2850,39 @@ class ResultPopup(Panel):
         self.raise_()
         self.tick.stop()  # no page re-capture while it animates: it made the zoom stutter
 
-        def step(v):
-            v = float(v)
+        curve = QEasingCurve(ease)
+        clock = {"n": 0, "t0": 0.0, "over": False}
+
+        def finish():
+            if not clock["over"]:
+                clock["over"] = True
+                self.done(hide, then)
+
+        def step(_):
+            # The first frame is the expensive one (text, caches). Time starts on the second tick, after that
+            # frame is on screen, so the animation does not begin with a jump.
+            now = time.perf_counter()
+            clock["n"] += 1
+            if clock["n"] == 1:
+                p = 0.0
+            else:
+                if clock["n"] == 2:
+                    clock["t0"] = now
+                p = min((now - clock["t0"]) * 1000.0 / ms, 1.0)
+            v = curve.valueForProgress(p)
             self.k, self.o = k0 + (k1 - k0) * v, o0 + (o1 - o0) * v
             fx.set_state(self.k, self.o)
+            if p >= 1.0:
+                anim.stop()
+                finish()
 
-        anim = QVariantAnimation(self)
+        anim = QVariantAnimation(self)  # only a frame clock: the easing is applied in step()
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
-        anim.setDuration(ms)
-        anim.setEasingCurve(ease)
+        anim.setDuration(ms + 400)
+        anim.setEasingCurve(QEasingCurve.Linear)
         anim.valueChanged.connect(step)
-        anim.finished.connect(lambda: self.done(hide, then))
+        anim.finished.connect(finish)
         self.zoom = anim
         anim.start()
 
@@ -3748,13 +3820,11 @@ class CaptionButton(QAbstractButton):
 
 
 
-# ========== TITLE BAR / NAVBAR (Lines 1828-2051) ==========
 class TitleBar(QWidget):
     """Custom title bar. Transparent at rest; once the page under it is scrolled it shows a blurred,
     darkened copy of the content passing beneath it (like a website navbar)."""
     BLUR_SCALE, BLUR_RADIUS = 4.0, 5.0  # the blur runs at 1/3 size with a gaussian of this radius (bigger = stronger)
 
-    # ===== INITIALIZATION: Set up title bar layout and icon =====
     def __init__(self, win):
         super().__init__(win)
         self.win = win
@@ -3920,7 +3990,6 @@ class TitleBar(QWidget):
             rows.append((s ** 0.5, int(TINT * s)))
         return rows
 
-    # ===== COMPOSE_BLUR: Render blurred content with fade gradient =====
     def compose_blur(self, c, value):
         """Each row is an opaque mix of the sharp and the blurred content (all blur under the bar, easing back
         to sharp), so it replaces what is underneath instead of glowing on top of it."""
@@ -3960,7 +4029,6 @@ class TitleBar(QWidget):
         _, x, w, _ = self.blur
         return w == page.widget().width() and x == self.viewport_x(page)
 
-    # ===== REFRESH: Calculate blur amount and update cache =====
     def refresh(self):
         page = self.win.current_scroll_area()
         value = page.verticalScrollBar().value() if page is not None else 0
@@ -3986,7 +4054,6 @@ class TitleBar(QWidget):
         else:
             self._fade_to(target)
 
-    # ===== PAINT_EVENT: Draw the blurred title bar =====
     def paintEvent(self, _):
         p = QPainter(self)
         # the bar's left part has the sidebar's tone so the two read as one column
@@ -4003,7 +4070,6 @@ class TitleBar(QWidget):
 
 
 
-# ========== SOFT EDGE FADE ZONE (Lines 2054+) ==========
 class SoftEdge(QWidget):
     """Blur that keeps going below the title bar and fades out gradually, so the bar has no hard edge."""
 
@@ -4219,8 +4285,8 @@ class Kernel(QWidget):
         self.icon_q = queue.Queue()
         self.icon_done = queue.Queue()
         self.info_q, self.info_done, self.info_rows = queue.Queue(), queue.Queue(), {}
-        self.info_deferred = []  # app version/size lookups wait until the page is opened (or a few seconds in)
-        QTimer.singleShot(2000, self.flush_info)  # version/size lookups start shortly after launch, not on first open
+        self.info_deferred = []
+        QTimer.singleShot(2000, self.flush_info)
         # last known versions/sizes: rows show them straight away and the lookups below only refresh them
         self.info_cache_path = os.path.join(self.cfg.dir, "apps_info.json")
         self.info_dirty = False
@@ -4345,7 +4411,7 @@ class Kernel(QWidget):
         head.addWidget(clear)
         pl.addLayout(head)
         self.dl_hint = FlatLabel("No downloads yet. Anything you download or install shows up here.", 15)
-        self.dl_hint.setContentsMargins(0, 4, 0, 0)  # a hair lower
+        self.dl_hint.setContentsMargins(0, 4, 0, 0)
         pl.addWidget(self.dl_hint)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -5224,7 +5290,7 @@ class Kernel(QWidget):
             self.update_drive_filter(items)
             for root, label, free, total in items:
                 row = DriveRow(f"{label} ({root[:2]})", "")
-                row.text_col.setSpacing(7)  # more air between the name, usage line and legend
+                row.text_col.setSpacing(7)
                 spaced = row.sub.font()
                 spaced.setLetterSpacing(QFont.AbsoluteSpacing, 0.3)
                 row.sub.setFont(spaced)
@@ -5369,7 +5435,7 @@ class Kernel(QWidget):
         row = Row(app["name"], " · ".join(details))
         row.sub.setWordWrap(True)
         row.sub.setTextFormat(Qt.RichText)
-        row.text_col.setSpacing(6)  # a little air between the title, details and link
+        row.text_col.setSpacing(6)
         if openable:
             link = PathChip(loc)
             link.clicked.connect(lambda path=loc: os.startfile(path))
@@ -5393,7 +5459,7 @@ class Kernel(QWidget):
         u.clicked.connect(lambda _=False, a=app, b=u: self.uninstall_app(a, b))
         row.right.addWidget(bar)
         row.right.addWidget(sz)
-        row.right.addSpacing(14)  # moves the size left, leaving the button more room
+        row.right.addSpacing(14)
         row.right.addWidget(u)
         return row
 
@@ -6513,7 +6579,7 @@ class Kernel(QWidget):
         self.show_result(title, "Applied" if targets == {True} else "Reverted" if targets == {False} else "Done")
 
         def work(job):
-            def log(msg):  # the Activity log as before, plus the popup
+            def log(msg):
                 job.log(msg)
                 self.popup_log.emit(str(msg))
             for name, fn, target in operations:
