@@ -2653,14 +2653,14 @@ class PillLink(QAbstractButton):
 
 
 class SystemIcon(QWidget):
-    """Small static alert icon for the result badge: a solid white triangle with softly rounded corners and a
-    dark exclamation mark. Everything is a filled shape (no thick strokes), so the edges stay crisp."""
+    """Small static alert icon for the result badge: an amber triangle with softly rounded corners and a dark
+    exclamation mark. Everything is a filled shape (no thick strokes), so the edges stay crisp."""
     S = 22
 
     def __init__(self, parent):
         super().__init__(parent)
         self.setFixedSize(self.S, self.S)
-        corners, r = [(11.0, 2.4), (20.6, 19.2), (1.4, 19.2)], 2.3
+        corners, r = [(11.0, 3.0), (20.4, 19.2), (1.6, 19.2)], 2.8
         tri = QPainterPath()
         for i, (x, y) in enumerate(corners):
             px, py = corners[i - 1]
@@ -2672,18 +2672,21 @@ class SystemIcon(QWidget):
             tri.quadTo(QPointF(x, y), end)
         tri.closeSubpath()
         self.tri = tri
-        self.stem = QRectF(9.9, 7.4, 2.2, 6.0)
-        self.dot = QPointF(11.0, 16.2)
+        self.stem = QRectF(10.0, 8.2, 2.0, 5.2)
+        self.dot = QPointF(11.0, 16.0)
+        self.fill = QLinearGradient(0, 3, 0, 19.5)
+        self.fill.setColorAt(0.0, QColor(255, 202, 110))
+        self.fill.setColorAt(1.0, QColor(244, 160, 52))
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(255, 255, 255, 165))  # dimmed: the icon supports the text, it should not shout
+        p.setBrush(QBrush(self.fill))
         p.drawPath(self.tri)
-        p.setBrush(QColor(14, 14, 14))
-        p.drawRoundedRect(self.stem, 1.1, 1.1)
-        p.drawEllipse(self.dot, 1.25, 1.25)
+        p.setBrush(QColor(52, 30, 4))
+        p.drawRoundedRect(self.stem, 1.0, 1.0)
+        p.drawEllipse(self.dot, 1.2, 1.2)
 
 
 class BadgeZoom(QGraphicsEffect):
