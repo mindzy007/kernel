@@ -20,13 +20,13 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QBrush, QColor, QCursor, QDesktopServices, QFont, QFontDatabase, QGradient, QFontMetrics, QFontMetricsF, QIcon, QTransform, QImage, QLinearGradient,
-    QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient, QRegion,
+    QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QRadialGradient, QRegion, QTextCursor,
 )
 from PySide6.QtWidgets import (
     QAbstractButton, QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGraphicsDropShadowEffect, QGraphicsEffect,
     QGraphicsOpacityEffect,
     QComboBox, QGridLayout, QGraphicsPixmapItem, QGraphicsScene, QHBoxLayout, QLabel, QLineEdit, QMessageBox,
-    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QStackedWidget, QStyle, QStyledItemDelegate, QSizePolicy,
+    QPlainTextEdit, QPushButton, QScrollArea, QSlider, QTextEdit, QStackedWidget, QStyle, QStyledItemDelegate, QSizePolicy,
     QVBoxLayout, QWidget,
 )
 from shiboken6 import isValid
@@ -73,8 +73,9 @@ QLineEdit#search {{ background: #161616; border: 1px solid #262626; border-radiu
                    padding: 13px 16px; font-size: 16px; selection-background-color: #444444; }}
 QLineEdit#search:focus {{ border-color: #4a4a4a; }}
 #row {{ background: transparent; border: none; border-radius: 14px; }}
-QPlainTextEdit {{ background: transparent; border: 1px solid {BORDER}; border-radius: 12px; padding: 12px;
+QPlainTextEdit, QTextEdit#logView {{ background: transparent; border: 1px solid {BORDER}; border-radius: 12px; padding: 12px;
                  font-family: 'Cascadia Mono', Consolas; font-size: 14px; color: #bdbdbd; }}
+QTextEdit#logView {{ padding: 12px 24px 12px 12px; }}
 #metric {{ background: #0f0f0f; border: 1px solid {BORDER}; border-radius: 12px; }}
 #metricValue {{ font-size: 22px; font-weight: 500; }}
 #attention {{ background: #100e08; border: 1px solid #55421c; border-radius: 14px; }}
@@ -378,11 +379,14 @@ class AnimButton(QPushButton):
         p.translate(-c)
 
 
-class LogView(QPlainTextEdit):
-    """Log box with Copy and Clear buttons floating in its bottom-left corner."""
+class LogView(QTextEdit):
+    """Log box with Copy and Clear buttons floating in its bottom-left corner. It is a QTextEdit rather than a
+    QPlainTextEdit because that one scrolls a whole line at a time, so wheel scrolling could not be eased."""
 
     def __init__(self, clearable=True):
         super().__init__()
+        self.setObjectName("logView")
+        self.setAcceptRichText(False)
         self.copy_btn = Button("Copy")
         self.clear_btn = Button("Clear")
         for b in (self.copy_btn, self.clear_btn):
@@ -393,6 +397,17 @@ class LogView(QPlainTextEdit):
         self.copy_label = "Copy"
         self.copy_btn.clicked.connect(self.copy_all)
         self.clear_btn.clicked.connect(self.clear)
+
+    def appendPlainText(self, text):
+        bar = self.verticalScrollBar()
+        follow = bar.value() >= bar.maximum() - 4  # only keep following the newest line if you were at the bottom
+        cursor = QTextCursor(self.document())
+        cursor.movePosition(QTextCursor.End)
+        if not self.document().isEmpty():
+            cursor.insertBlock()
+        cursor.insertText(text)
+        if follow:
+            bar.setValue(bar.maximum())
 
     def flash_copied(self):
         self.copy_btn.setText("Copied")
@@ -2263,6 +2278,7 @@ class IOSScrollBar(QWidget):
         self.idle.setInterval(900)
         self.idle.timeout.connect(self.dim)
         self.bar.valueChanged.connect(self.poke)
+        self.bar.valueChanged.connect(lambda *_: self.update())  # follow the content on every scroll step
         self.bar.rangeChanged.connect(self.place)
         area.installEventFilter(self)
         self.place()
@@ -5786,7 +5802,10 @@ class Kernel(QWidget):
         pl.addSpacing(16)
         self.log = LogView()
         self.log.setReadOnly(True)
+        self.log.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # the floating pill replaces it
+        self.log.viewport().setAutoFillBackground(False)  # transparent: scrolling repaints instead of blitting, which dragged the pill's pixels along
         SmoothScroller(self.log)
+        self.log_bar = IOSScrollBar(self.log, top=10, bottom=10)
         pl.addWidget(self.log, 1)
         return page
 
