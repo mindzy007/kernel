@@ -55,7 +55,7 @@ CACHE_MARGIN = 120  # rows of page content blurred above/below the title bar zon
 ACCENTS = (("White", "#ffffff"), ("Blue", "#5b9cff"), ("Violet", "#a78bfa"), ("Pink", "#ff7ab8"),
            ("Green", "#4fd08a"), ("Amber", "#ffb454"), ("Red", "#ff6b6b"))
 CATEGORY_COLORS = {"Apps": "#bf5af2", "Games": "#30d158", "Documents & files": "#0a84ff",
-                   "System": "#454549", "Other": "#8e8e93"}
+                   "System": "#64646a", "Other": "#9a9aa0"}
 FREE_COLOR = "#c8c8cd"  # free space: a soft off-white
 
 QSS = f"""
@@ -1260,28 +1260,29 @@ class Row(HoverFrame):
 
 
 class DotPie(QWidget):
-    """A drive's usage as a round disc of dots: ring k holds 6k dots, so the outline is a true circle and the dots
-    line up along six spokes (1 + 6 + 12 + ... + 48 = 217 dots, the size where the circle is exactly full).
-    Each category owns one wedge of dots (grouped, never scattered) in its own colour; a category worth a single
-    dot sits on the outer ring. Dots pop in from the centre outward; hovering a dot lifts its whole group."""
+    """A drive's usage as a gauge made of rounded squares. Every square is the same share of the drive. The used
+    categories fill the grid from the bottom up in their own colours, biggest at the bottom and smallest on top
+    (back and forth like a snake, so each stays one connected block); the free space above them is shown as
+    faint empty squares, like the unfilled part of a tank. Squares rise in from the bottom; hovering one lifts
+    its whole group."""
     hovered = Signal(int)
-    RINGS, SPACING, DOT = 8, 13.5, 5.6
+    COLS, ROWS, PITCH, CELL = 16, 16, 15.4, 11.4  # PITCH - CELL is the gap between squares
 
     def __init__(self):
         super().__init__()
         self.setFixedSize(260, 250)
         self.setMouseTracking(True)
         self.slices = []  # (name, bytes, "#rrggbb")
-        self.owner = []  # slice index of every dot, in clockwise order from the top
+        self.owner = []  # slice index of every square, in fill order (bottom row first)
         self._sweep, self.hover, self.pops = 1.0, -1, []
-        pts = [(0.0, 0.0)]
-        for k in range(1, self.RINGS + 1):
-            for j in range(6 * k):
-                a = 2 * math.pi * j / (6 * k)
-                pts.append((k * self.SPACING * math.sin(a), -k * self.SPACING * math.cos(a)))
-        pts.sort(key=lambda q: math.atan2(q[0], -q[1]) % (2 * math.pi) if math.hypot(*q) > 1e-6 else 0.0)
+        pts, norm = [], []  # fill order: bottom row first, then back and forth up the grid (a snake)
+        for row in range(self.ROWS):
+            for col in (range(self.COLS) if row % 2 == 0 else range(self.COLS - 1, -1, -1)):
+                pts.append(((col - (self.COLS - 1) / 2) * self.PITCH, ((self.ROWS - 1) / 2 - row) * self.PITCH))
+                # 0 at the bottom .. 1 at the top, with a slight left-to-right lean so each row ripples in
+                norm.append((row + 0.35 * col / (self.COLS - 1)) / (self.ROWS - 1 + 0.35))
         self.N = len(pts)
-        self.norm = [math.hypot(x, y) / (self.RINGS * self.SPACING) for x, y in pts]  # 0 centre .. 1 outer ring
+        self.norm = norm
         self.pts = pts
         self.sweep_anim = QVariantAnimation(self)
         self.sweep_anim.setDuration(1300)
@@ -1303,7 +1304,7 @@ class DotPie(QWidget):
 
     def _ease(self):
         now = time.perf_counter()  # ease by real elapsed time, so it is equally smooth at any frame rate
-        k = 1 - math.exp(-min(now - self._last, 0.05) / 0.09)
+        k = 1 - math.exp(-min(now - self._last, 0.05) / 0.19)
         self._last = now
         busy = False
         for i, v in enumerate(self.pops):
@@ -1330,7 +1331,7 @@ class DotPie(QWidget):
         self.sweep_anim.start()
 
     def _allocate(self):
-        """How many of the 100 dots each slice gets: proportional, every non-empty slice at least one."""
+        """How many squares each slice gets: proportional, every non-empty slice at least one."""
         total = sum(s[1] for s in self.slices) or 1
         raw = [s[1] / total * self.N for s in self.slices]
         counts = [int(r) for r in raw]
@@ -1344,58 +1345,10 @@ class DotPie(QWidget):
         return counts
 
     def _assign(self, counts):
-        """Which group owns each dot. Starting at 12 o'clock and going clockwise: the categories from the biggest
-        to the smallest, then Free (the remainder) last. Each one is a wedge from the centre. A group too small to
-        reach the centre (no more dots than there are rings) is a compact clump on the rim instead, where its place
-        in that order falls, so it never becomes a lonely sliver in the middle."""
-        n, two_pi = len(self.pts), 2 * math.pi
-        ang = lambda i: math.atan2(self.pts[i][0], -self.pts[i][1]) % two_pi
-        small = lambda c: 0 < c <= self.RINGS
-        free = next((i for i, sl in enumerate(self.slices) if sl[0] == "Free"), -1)
-        order = sorted((s for s in range(len(counts)) if s != free), key=lambda s: -counts[s])
-        order += [free] if free >= 0 else []
-        owner, start, acc = [-1] * n, [0] * len(counts), 0
-        for s in order:
-            start[s] = acc
-            acc += counts[s]
-        rim = [i for i in range(n) if self.norm[i] > 0.999]
-        rim_r = self.RINGS * self.SPACING
-        touching = lambda i, j: (self.pts[i][0] - self.pts[j][0]) ** 2 + \
-                                (self.pts[i][1] - self.pts[j][1]) ** 2 <= (1.2 * self.SPACING) ** 2
-        edge = None  # clumps are laid along the rim clockwise, each starting where the previous one ended
-        for s in order:
-            c = counts[s]
-            if not small(c):
-                continue
-            if edge is None:
-                edge = ang(min(start[s], n - 1)) - 1e-9  # the angle of the dot where this slot really begins
-            free_rim = [i for i in rim if owner[i] < 0] or [i for i in range(n) if owner[i] < 0]
-            anchor = min([i for i in free_rim if ang(i) >= edge] or free_rim, key=ang)
-            ax, ay, aa = self.pts[anchor][0], self.pts[anchor][1], ang(anchor)
-
-            def dist(i):
-                # nearest to the anchor, leaning toward the rim so the clump is a band along the edge, and
-                # strongly toward the clockwise side so clumps keep the order
-                d = (self.pts[i][0] - ax) ** 2 + (self.pts[i][1] - ay) ** 2
-                d += 2.0 * (rim_r - math.hypot(*self.pts[i])) ** 2
-                behind = (aa - ang(i) + math.pi) % two_pi - math.pi
-                return d + (6.0 * (behind * rim_r) ** 2 if behind > 0.02 else 0.0)
-
-            clump = [anchor]
-            owner[anchor] = s
-            while len(clump) < c:  # grow outward from the anchor one touching dot at a time: always one piece
-                near = [i for i in range(n) if owner[i] < 0 and any(touching(i, j) for j in clump)]
-                after = [i for i in near if ang(i) >= edge - 1e-9]  # never reach back into the previous group
-                best = min(after or near or [i for i in range(n) if owner[i] < 0], key=dist)
-                owner[best] = s
-                clump.append(best)
-            edge = max(ang(i) for i in clump) + 0.01
-        rest = [i for i in range(n) if owner[i] < 0]  # angular order, from 12 o'clock
-        it = iter(rest)
-        for s in order:
-            if not small(counts[s]):
-                for _ in range(counts[s]):
-                    owner[next(it)] = s
+        """Which group owns each square: used categories from the bottom up, biggest first, free space last."""
+        owner = []
+        for s in sorted(range(len(counts)), key=lambda k: (self.slices[k][0] == "Free", -self.slices[k][1])):
+            owner += [s] * counts[s]
         return owner
 
     def set_slices(self, slices):
@@ -1418,28 +1371,35 @@ class DotPie(QWidget):
         dim = max(self.pops) if self.pops else 0.0
         colors = [QColor(sl[2]) for sl in self.slices]
         for idx, (x, y) in enumerate(self.pts):
-            # centre first, edge last, with a wide overlap so the dots flow outward like a ripple
+            # bottom row first, top row last, with a wide overlap so the squares rise like a ripple
             appear = min(1.0, max(0.0, (self._sweep * 1.9 - self.norm[idx]) / 0.9))
             if appear <= 0:
                 continue
-            e = appear * appear * (3 - 2 * appear)  # each dot eases in on its own (smoothstep)
+            e = appear * appear * (3 - 2 * appear)  # each square eases in on its own (smoothstep)
             g = self.owner[idx]
             pop = self.pops[g]
             pop = pop * pop * (3 - 2 * pop)
-            r = self.DOT * (0.3 + 0.7 * e) * (1 + 0.08 * pop)  # starts at 30% size: nothing pops out of thin air
+            half = self.CELL / 2 * (0.3 + 0.7 * e)  # starts at 30% size: nothing pops out of thin air; hover never resizes
             k = dim * (1 - pop)  # 0 for the hovered group, up to 1 for the others
-            p.setOpacity(e * (1 - 0.2 * k))
-            c = colors[g].toHsl()  # HSL keeps lightness when desaturating: dark colours don't wash out
-            c.setHsl(c.hue(), int(c.hslSaturation() * (1 - 0.35 * k)),
-                     int(c.lightness() * (1 - 0.25 * k * c.lightness() / 255)))
+            empty = self.slices[g][0] == "Free"  # free space is drawn as faint, empty squares
+            ghost = 0.16 + 0.3 * pop if empty else 1.0
+            p.setOpacity(e * ghost * (1 - 0.6 * k))  # the others fade, so the hovered group stands out
+            c = colors[g]
+            if pop > 0.01 and not empty:  # the hovered group gets lighter and a thin outline, so dark colours read as selected too
+                t = (0.10 + 0.22 * (1 - c.lightness() / 255)) * pop  # darker colours are lifted more
+                c = QColor(int(c.red() + (255 - c.red()) * t), int(c.green() + (255 - c.green()) * t),
+                           int(c.blue() + (255 - c.blue()) * t))
+                p.setPen(QPen(QColor(255, 255, 255, int(38 * pop)), 1))
+            else:
+                p.setPen(Qt.NoPen)
             p.setBrush(c)
-            p.drawEllipse(QPointF(cx + x, cy + y), r, r)
+            p.drawRoundedRect(QRectF(cx + x - half, cy + y - half, half * 2, half * 2), half * 0.34, half * 0.34)
 
     def _hit(self, pos):
         cx, cy = self.width() / 2, self.height() / 2
-        best, best_d = -1, (self.SPACING * 0.6) ** 2  # the gaps between dots count too: no dead spots
+        best, best_d = -1, (self.PITCH * 0.75) ** 2  # the gaps between squares count too: no dead spots
         for idx, (x, y) in enumerate(self.pts):
-            if self._sweep * 1.9 - self.norm[idx] <= 0:  # dots that have not appeared yet can't be hovered
+            if self._sweep * 1.9 - self.norm[idx] <= 0:  # squares that have not appeared yet can't be hovered
                 continue
             d = (pos.x() - cx - x) ** 2 + (pos.y() - cy - y) ** 2
             if d <= best_d:
@@ -1462,7 +1422,7 @@ class DotPie(QWidget):
             self.settle.stop()
         elif idx != self._pending or not self.settle.isActive():
             self._pending = idx
-            self.settle.start(90 if idx < 0 else 15)  # leaving is slower than switching: no flicker in the gaps
+            self.settle.start(110 if idx < 0 else 30)  # leaving is slower than switching: no flicker in the gaps
 
     def leaveEvent(self, e):
         self._pending = -1
@@ -1581,31 +1541,41 @@ def drive_capacity(total):
     return f"{near if abs(near - gb) / near < 0.07 else round(gb)} GB"
 
 
-class DimOverlay(QWidget):
-    """Dims the line it sits on by painting the panel colour over it. (A graphics effect would do the same,
-    but widgets with an effect are drawn at the wrong offset when the title bar blur copies the page.)"""
+class TintLabel(QLabel):
+    """Label that paints its own text in a colour that can change every frame without touching any stylesheet."""
 
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.amount = 0.0
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        parent.installEventFilter(self)
-        self.setGeometry(parent.rect())
-        self.hide()
+    def __init__(self, text, tint):
+        super().__init__(text)
+        self.tint = QColor(tint)
 
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Resize:
-            self.setGeometry(self.parent().rect())
-        return False
-
-    def set_amount(self, v):
-        self.amount = float(v)
-        self.setVisible(self.amount > 0.01)
-        self.raise_()
+    def set_tint(self, color):
+        self.tint = color
         self.update()
 
     def paintEvent(self, _):
-        QPainter(self).fillRect(self.rect(), QColor(12, 12, 12, int(255 * self.amount)))
+        p = QPainter(self)
+        p.setFont(self.font())
+        p.setPen(self.tint)
+        p.drawText(self.contentsRect(), int(self.alignment()), self.text())
+
+
+class LineDim:
+    """Dims a breakdown line by blending the colour of its own text toward the panel colour. Nothing is drawn on
+    top of the line, so no box can show up over the text."""
+    TARGET = QColor(15, 15, 15)
+
+    def __init__(self, line):
+        self.line = line
+        self.amount = 0.0
+
+    def set_amount(self, v):
+        v = float(v)
+        self.amount = v
+        t = self.TARGET
+        for label, base in self.line.parts:
+            label.set_tint(QColor(int(base.red() + (t.red() - base.red()) * v),
+                                  int(base.green() + (t.green() - base.green()) * v),
+                                  int(base.blue() + (t.blue() - base.blue()) * v)))
 
 
 class DrivePanel(QWidget):
@@ -1640,7 +1610,7 @@ class DrivePanel(QWidget):
         self.right.setSpacing(16)
         lay.addLayout(self.right, 1)
         self.default_caption, self.total = "", 0
-        self.lines = []  # (widget, dim overlay) of each breakdown line, in slice order
+        self.lines = []  # (widget, dimmer) of each breakdown line, in slice order
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -1696,19 +1666,20 @@ class DrivePanel(QWidget):
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(12)
-        dot = QLabel("\u25cf")
-        dot.setStyleSheet(f"color: {color}; font-size: 12px;")
-        nm = QLabel(name)
+        dot = TintLabel("\u25cf", color)
+        dot.setStyleSheet("font-size: 12px;")
+        nm = TintLabel(name, TEXT)
         nm.setStyleSheet("font-size: 15px; font-weight: 500;")
-        sz = QLabel(size)
+        sz = TintLabel(size, TEXT)
         sz.setStyleSheet("font-size: 15px; font-weight: 500;")
         sz.setFixedWidth(96)
         sz.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        pc = QLabel(pct)
+        pc = TintLabel(pct, MUTED)
         pc.setObjectName("muted")
         pc.setStyleSheet("font-weight: 500;")
         pc.setFixedWidth(46)
         pc.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        w.parts = [(dot, QColor(color)), (nm, QColor(TEXT)), (sz, QColor(TEXT)), (pc, QColor(MUTED))]
         for x in (dot, nm):
             h.addWidget(x)
         h.addStretch()
@@ -1770,7 +1741,7 @@ class DrivePanel(QWidget):
             col.setSpacing(9)
             for name, size, color in self.pie.slices:
                 line = self._line(color, name, apps.human(size), self._pct(size))
-                self.lines.append((line, DimOverlay(line)))
+                self.lines.append((line, LineDim(line)))
                 col.addWidget(line)
             self.right.addLayout(col)
         folders = [f for f in folders if f[1] > 0][:5]
