@@ -2647,13 +2647,14 @@ class PillLink(QAbstractButton):
 
 
 class SystemIcon(QWidget):
-    """Small static alert icon for the result badge: an amber triangle with softly rounded corners and a dark
-    exclamation mark. Everything is a filled shape (no thick strokes), so the edges stay crisp."""
+    """Small static status icon for the result badge. Success: a soft green circle with a check mark. Failure: an
+    amber warning triangle with an exclamation mark. Everything is a filled shape, so the edges stay crisp."""
     S = 22
 
     def __init__(self, parent):
         super().__init__(parent)
         self.setFixedSize(self.S, self.S)
+        self.ok = True
         corners, r = [(11.0, 3.0), (20.4, 19.2), (1.6, 19.2)], 2.8
         tri = QPainterPath()
         for i, (x, y) in enumerate(corners):
@@ -2668,15 +2669,33 @@ class SystemIcon(QWidget):
         self.tri = tri
         self.stem = QRectF(10.0, 8.2, 2.0, 5.2)
         self.dot = QPointF(11.0, 16.0)
-        self.fill = QLinearGradient(0, 3, 0, 19.5)
-        self.fill.setColorAt(0.0, QColor(255, 202, 110))
-        self.fill.setColorAt(1.0, QColor(244, 160, 52))
+        self.warn = QLinearGradient(0, 3, 0, 19.5)
+        self.warn.setColorAt(0.0, QColor(255, 202, 110))
+        self.warn.setColorAt(1.0, QColor(244, 160, 52))
+        self.good = QLinearGradient(0, 2, 0, 20)
+        self.good.setColorAt(0.0, QColor(96, 218, 148))
+        self.good.setColorAt(1.0, QColor(56, 188, 114))
+        self.tick = QPainterPath()
+        self.tick.moveTo(6.6, 11.3)
+        self.tick.lineTo(9.7, 14.4)
+        self.tick.lineTo(15.6, 7.9)
+
+    def set_ok(self, ok):
+        self.ok = ok
+        self.update()
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
-        p.setBrush(QBrush(self.fill))
+        if self.ok:
+            p.setBrush(QBrush(self.good))
+            p.drawEllipse(QPointF(11, 11), 9.2, 9.2)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(10, 40, 22), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPath(self.tick)
+            return
+        p.setBrush(QBrush(self.warn))
         p.drawPath(self.tri)
         p.setBrush(QColor(52, 30, 4))
         p.drawRoundedRect(self.stem, 1.0, 1.0)
@@ -2867,6 +2886,7 @@ class ResultPopup(Panel):
     def reveal(self, title, sub, ok):
         room = min(520, self.parentWidget().width() - 48) - 210
         self.ok = ok
+        self.icon.set_ok(ok)
         self.title.setText(QFontMetrics(self.title.font()).elidedText(title, Qt.ElideRight, room))
         self.sub.setText(QFontMetrics(self.sub.font()).elidedText(sub, Qt.ElideRight, room))
         self.title.setToolTip(title)
