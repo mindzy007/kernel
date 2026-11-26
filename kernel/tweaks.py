@@ -1115,6 +1115,7 @@ def t_cursor(log):
 NVIDIA_MARKER = os.path.join(os.environ.get("APPDATA", ""), "kernel", "nvidia_profile_applied")
 
 
+
 def _npi_exe(log):
     import urllib.request
     import zipfile
@@ -1192,6 +1193,8 @@ def _revert_nvidia_profile(log):
 
 # Run-once actions shown as buttons instead of toggles
 ONE_SHOT = {"t_temp", "t_system_repair", "t_nvidia_cache"}
+# Tweaks whose state cannot be read back cheaply: Apply stays clickable (it just imports again)
+ALWAYS_APPLY = {"t_nvidia_profile"}
 
 # Tweaks with no way back; the UI warns before applying and disables Revert
 IRREVERSIBLE = {"t_onedrive", "t_remove_apps", "t_clear_start"}

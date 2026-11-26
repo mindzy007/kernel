@@ -39,7 +39,7 @@ import storage
 from version import VERSION
 UPDATE_REPO = "mindzy007/kernel"  # app updates are read from github.com/mindzy007/kernel/releases
 from jobs import ACTIVE, Job, JobManager
-from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, is_active, revert_tweak
+from tweaks import TASKS, ONE_SHOT, IRREVERSIBLE, ALWAYS_APPLY, is_active, revert_tweak
 
 ISSUES_URL = f"https://github.com/{UPDATE_REPO}/issues/new"  # bug reports open a pre-filled GitHub issue
 DONATE_URL = "https://ko-fi.com/mindzy"
@@ -1946,6 +1946,8 @@ class MetricCard(QFrame):
 
 
 class TaskRow(Row):
+    always = False  # True: Apply never greys out (the tweak's state can't be read back), and Revert stays usable
+
     def __init__(self, title, subtitle, on_apply=None, on_revert=None, reversible=True):
         super().__init__(title, subtitle)
         self.reversible = reversible
@@ -1981,6 +1983,11 @@ class TaskRow(Row):
 
     def set_active(self, active):
         if self.apply is None:
+            return
+        if self.always:
+            self.apply.setText("Apply")
+            self.apply.setEnabled(True)
+            self.revert.setEnabled(self.reversible)
             return
         self.apply.setText("Applied" if active else "Apply")
         self.apply.setEnabled(not active)
@@ -5220,6 +5227,7 @@ class Kernel(QWidget):
                     lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
                     lambda _=False, n=name, f=fn: self.run_reverts([(n, f)]),
                     reversible=fn.__name__ not in IRREVERSIBLE)
+                r.always = fn.__name__ in ALWAYS_APPLY
                 r.set_active(is_active(fn))
                 self.rows.append((r, fn.__name__, name, fn))
                 page.add(r)
