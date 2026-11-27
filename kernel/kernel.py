@@ -2604,7 +2604,7 @@ class PillLink(QAbstractButton):
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.NoFocus)
         f = QFont(self.font())
-        f.setPixelSize(13)
+        f.setPixelSize(14)
         self.setFont(f)
         self.setFixedSize(QFontMetrics(f).horizontalAdvance(text) + 28, self.H)
         self._hover = 0.0
@@ -2647,7 +2647,7 @@ class PillLink(QAbstractButton):
 
 
 class SystemIcon(QWidget):
-    """Small static status icon for the result badge. Success: a soft green circle with a check mark. Failure: an
+    """Small static status icon for the result badge. Success: a thin green ring with a check mark. Failure: an
     amber warning triangle with an exclamation mark. Everything is a filled shape, so the edges stay crisp."""
     S = 22
 
@@ -2676,9 +2676,9 @@ class SystemIcon(QWidget):
         self.good.setColorAt(0.0, QColor(96, 218, 148))
         self.good.setColorAt(1.0, QColor(56, 188, 114))
         self.tick = QPainterPath()
-        self.tick.moveTo(6.6, 11.3)
-        self.tick.lineTo(9.7, 14.4)
-        self.tick.lineTo(15.6, 7.9)
+        self.tick.moveTo(7.2, 11.3)
+        self.tick.lineTo(9.8, 13.9)
+        self.tick.lineTo(14.9, 8.5)
 
     def set_ok(self, ok):
         self.ok = ok
@@ -2689,10 +2689,9 @@ class SystemIcon(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setPen(Qt.NoPen)
         if self.ok:
-            p.setBrush(QBrush(self.good))
-            p.drawEllipse(QPointF(11, 11), 9.2, 9.2)
             p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor(10, 40, 22), 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.setPen(QPen(QColor(62, 207, 142), 1.9, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawEllipse(QPointF(11, 11), 8.7, 8.7)
             p.drawPath(self.tick)
             return
         p.setBrush(QBrush(self.warn))
@@ -2763,11 +2762,11 @@ class ResultPopup(Panel):
         self.title = QLabel("")
         tf = QFont(self.title.font())
         tf.setPixelSize(14)
-        tf.setWeight(QFont.DemiBold)
+        tf.setWeight(QFont.Bold)
         self.title.setFont(tf)
         self.sub = QLabel("")
         sf = QFont(self.sub.font())
-        sf.setPixelSize(13)
+        sf.setPixelSize(14)
         self.sub.setFont(sf)
         self.sub.setStyleSheet(f"color: {MUTED};")
         col.addWidget(self.title)
@@ -6699,7 +6698,7 @@ class Kernel(QWidget):
         title = ", ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
         self.tweak_title = title
         targets = {target for _, _, target in operations}
-        self.show_result(title, "Applied" if targets == {True} else "Reverted" if targets == {False} else "Done")
+        self.show_result(title, "Successfully Applied" if targets == {True} else "Successfully Reverted" if targets == {False} else "Done")
 
         def work(job):
             def log(msg):
