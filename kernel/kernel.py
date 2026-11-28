@@ -1542,21 +1542,49 @@ def drive_capacity(total):
 
 
 class TintLabel(QLabel):
-    """Label that paints its own text in a colour that can change every frame without touching any stylesheet."""
+    """Label that paints its own text in a colour that can change every frame without touching any stylesheet.
+    It can also swap its text with a transition: the old text fades out, then the new one fades in (x goes
+    0 -> 1). Fade only, no movement: text snaps to whole pixels, so sliding it looked jittery."""
 
     def __init__(self, text, tint):
         super().__init__(text)
         self.tint = QColor(tint)
+        self.old = ""
+        self.x = 1.0
 
     def set_tint(self, color):
         self.tint = color
         self.update()
 
+    def fade_to(self, text):
+        self.old = self.text()
+        self.x = 0.0
+        self.setText(text)
+
+    def set_progress(self, x):
+        self.x = x
+        self.update()
+
     def paintEvent(self, _):
         p = QPainter(self)
-        p.setFont(self.font())
-        p.setPen(self.tint)
-        p.drawText(self.contentsRect(), int(self.alignment()), self.text())
+        f = QFont(self.font())
+        f.setStyleStrategy(QFont.NoSubpixelAntialias)  # same grayscale smoothing during the zoom and at rest
+        p.setFont(f)
+        rect, flags = self.contentsRect(), int(self.alignment())
+        new_alpha = 1.0
+        if self.x < 1.0 and self.old:
+            old_alpha = 1.0 - min(1.0, self.x / 0.4)
+            if old_alpha > 0.01:
+                c = QColor(self.tint)
+                c.setAlphaF(old_alpha * self.tint.alphaF())
+                p.setPen(c)
+                p.drawText(rect, flags, self.old)
+            new_alpha = max(0.0, (self.x - 0.4) / 0.6)
+        if new_alpha > 0.01:
+            c = QColor(self.tint)
+            c.setAlphaF(new_alpha * self.tint.alphaF())
+            p.setPen(c)
+            p.drawText(rect, flags, self.text())
 
 
 class LineDim:
@@ -2605,6 +2633,7 @@ class PillLink(QAbstractButton):
         self.setFocusPolicy(Qt.NoFocus)
         f = QFont(self.font())
         f.setPixelSize(14)
+        f.setStyleStrategy(QFont.NoSubpixelAntialias)
         self.setFont(f)
         self.setFixedSize(QFontMetrics(f).horizontalAdvance(text) + 28, self.H)
         self._hover = 0.0
@@ -2647,58 +2676,89 @@ class PillLink(QAbstractButton):
 
 
 class SystemIcon(QWidget):
-    """Small static status icon for the result badge. Success: a thin green ring with a check mark. Failure: an
-    amber warning triangle with an exclamation mark. Everything is a filled shape, so the edges stay crisp."""
-    S = 22
+    """Status icon for the result badge, kept minimal: a flat, muted squircle with a thin white glyph. Green with a
+    check for success, amber with an exclamation mark for a failure, grey with three dots while working. Changing
+    state glides the colour, cross-fades the glyph and gives the squircle a small pop. Drawn on a 24-unit grid."""
+    S, GRID, PAD = 20, 24.0, 4  # PAD: spare room around the icon for the pop
+    COLORS = {None: (104, 104, 110), True: (48, 164, 92), False: (224, 158, 56)}
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.setFixedSize(self.S, self.S)
-        self.ok = True
-        corners, r = [(11.0, 3.0), (20.4, 19.2), (1.6, 19.2)], 2.8
-        tri = QPainterPath()
-        for i, (x, y) in enumerate(corners):
-            px, py = corners[i - 1]
-            nx, ny = corners[(i + 1) % 3]
-            a, b = math.hypot(px - x, py - y), math.hypot(nx - x, ny - y)
-            start = QPointF(x + (px - x) / a * r, y + (py - y) / a * r)
-            end = QPointF(x + (nx - x) / b * r, y + (ny - y) / b * r)
-            tri.moveTo(start) if i == 0 else tri.lineTo(start)
-            tri.quadTo(QPointF(x, y), end)
-        tri.closeSubpath()
-        self.tri = tri
-        self.stem = QRectF(10.0, 8.2, 2.0, 5.2)
-        self.dot = QPointF(11.0, 16.0)
-        self.warn = QLinearGradient(0, 3, 0, 19.5)
-        self.warn.setColorAt(0.0, QColor(255, 202, 110))
-        self.warn.setColorAt(1.0, QColor(244, 160, 52))
-        self.good = QLinearGradient(0, 2, 0, 20)
-        self.good.setColorAt(0.0, QColor(96, 218, 148))
-        self.good.setColorAt(1.0, QColor(56, 188, 114))
+        self.setFixedSize(self.S + 2 * self.PAD, self.S + 2 * self.PAD)
+        self.ok, self.prev, self.t = True, True, 1.0
+        c, half, n = self.GRID / 2, self.GRID / 2 - 0.5, 4.6  # n > 2 squares the circle off: a superellipse
+        pts = QPolygonF()
+        for k in range(241):
+            a = 2 * math.pi * k / 240
+            cs, sn = math.cos(a), math.sin(a)
+            pts.append(QPointF(c + half * math.copysign(abs(cs) ** (2 / n), cs),
+                               c + half * math.copysign(abs(sn) ** (2 / n), sn)))
+        self.shape = pts
         self.tick = QPainterPath()
-        self.tick.moveTo(7.2, 11.3)
-        self.tick.lineTo(9.8, 13.9)
-        self.tick.lineTo(14.9, 8.5)
+        self.tick.moveTo(7.4, 12.4)
+        self.tick.lineTo(10.4, 15.3)
+        self.tick.lineTo(16.6, 8.8)
+        self.stem = QRectF(11.0, 6.6, 2.0, 7.2)
+        self.dot = QPointF(12.0, 17.0)
+        self.anim = QVariantAnimation(self)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.setDuration(380)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.valueChanged.connect(self.set_t)
 
-    def set_ok(self, ok):
-        self.ok = ok
+    def set_t(self, v):
+        self.t = float(v)
         self.update()
+
+    def set_ok(self, ok, animate=False):
+        """True: success. False: failure. None: still working."""
+        if animate and ok != self.ok:
+            self.prev, self.ok, self.t = self.ok, ok, 0.0
+            self.anim.stop()
+            self.anim.start()
+        else:
+            self.anim.stop()
+            self.prev, self.ok, self.t = ok, ok, 1.0
+        self.update()
+
+    def glyph(self, p, state, alpha):
+        if alpha <= 0.01:
+            return
+        white = QColor(255, 255, 255, int(245 * min(alpha, 1.0)))
+        if state is None:
+            p.setPen(Qt.NoPen)
+            p.setBrush(white)
+            for x in (7.2, 12.0, 16.8):
+                p.drawEllipse(QPointF(x, 12.0), 1.5, 1.5)
+        elif state:
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(white, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            p.drawPath(self.tick)
+        else:
+            p.setPen(Qt.NoPen)
+            p.setBrush(white)
+            p.drawRoundedRect(self.stem, 1.0, 1.0)
+            p.drawEllipse(self.dot, 1.2, 1.2)
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        p.translate(self.PAD, self.PAD)
+        p.scale(self.S / self.GRID, self.S / self.GRID)
+        pop = 1 + 0.18 * math.sin(math.pi * self.t)  # grows a little in the middle of the change, then settles
+        p.translate(self.GRID / 2, self.GRID / 2)
+        p.scale(pop, pop)
+        p.translate(-self.GRID / 2, -self.GRID / 2)
+        a, b = self.COLORS[self.prev], self.COLORS[self.ok]
         p.setPen(Qt.NoPen)
-        if self.ok:
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor(62, 207, 142), 1.9, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            p.drawEllipse(QPointF(11, 11), 8.7, 8.7)
-            p.drawPath(self.tick)
-            return
-        p.setBrush(QBrush(self.warn))
-        p.drawPath(self.tri)
-        p.setBrush(QColor(52, 30, 4))
-        p.drawRoundedRect(self.stem, 1.0, 1.0)
-        p.drawEllipse(self.dot, 1.2, 1.2)
+        p.setBrush(QColor(*(int(a[k] + (b[k] - a[k]) * self.t) for k in range(3))))
+        p.drawPolygon(self.shape)
+        if self.t >= 1.0:
+            self.glyph(p, self.ok, 1.0)
+        else:
+            self.glyph(p, self.prev, 1.0 - min(1.0, self.t / 0.4))
+            self.glyph(p, self.ok, max(0.0, (self.t - 0.4) / 0.6))
 
 
 class BadgeZoom(QGraphicsEffect):
@@ -2752,23 +2812,22 @@ class ResultPopup(Panel):
         self.tick.setInterval(40)
         self.tick.timeout.connect(self.live)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(22, 0, 14, 0)
-        lay.setSpacing(14)
+        lay.setContentsMargins(18, 0, 14, 0)
+        lay.setSpacing(10)
         self.icon = SystemIcon(self)
         lay.addWidget(self.icon)
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addStretch()
-        self.title = QLabel("")
+        self.title = TintLabel("", TEXT)
         tf = QFont(self.title.font())
         tf.setPixelSize(14)
         tf.setWeight(QFont.Bold)
         self.title.setFont(tf)
-        self.sub = QLabel("")
+        self.sub = TintLabel("", MUTED)
         sf = QFont(self.sub.font())
         sf.setPixelSize(14)
         self.sub.setFont(sf)
-        self.sub.setStyleSheet(f"color: {MUTED};")
         col.addWidget(self.title)
         col.addWidget(self.sub)
         col.addStretch()
@@ -2783,16 +2842,18 @@ class ResultPopup(Panel):
         self.setFixedHeight(self.H)
         self.hide()
 
-    def snap(self):
+    def snap(self, width=None):
         """Blur the page content behind the badge. Same method as the Downloads pill and the search dock: grab the
-        page (a window grab has a transparent background, so the blur of it came out as flat dark)."""
+        page (a window grab has a transparent background, so the blur of it came out as flat dark). width: the
+        widest the badge will get, so one capture covers a whole width change."""
         win = self.parentWidget()
         self.bg, self.bg_src, self.glass = None, None, None
         cur = win.stack.currentWidget()
         page = cur if isinstance(cur, QScrollArea) else cur.findChild(QScrollArea)
         if page is None:
             return
-        g = QRect((win.width() - self.width()) // 2, TITLEBAR_H + self.GAP, self.width(), self.height())
+        w = max(width or 0, self.width())
+        g = QRect((win.width() - w) // 2, TITLEBAR_H + self.GAP, w, self.height())
         m = 24
         area = QRect(page.mapTo(win, QPoint(0, 0)), page.size())
         region = g.adjusted(-m, -m, m, m) & area
@@ -2802,10 +2863,17 @@ class ResultPopup(Panel):
         if shot.isNull():
             return
         shot.setDevicePixelRatio(1.0)
-        pm = blurred(shot, radius=18)
-        k = pm.width() / region.width()
-        off = g.topLeft() - region.topLeft()
-        self.bg = pm
+        self.bg = blurred(shot, radius=18)
+        self.cap_region, self.cap_k = region, self.bg.width() / region.width()
+        self.fit_glass()
+
+    def fit_glass(self):
+        """Cut the captured blur to the badge's current size and position."""
+        if self.bg is None:
+            return
+        win, k = self.parentWidget(), self.cap_k
+        g = QRect((win.width() - self.width()) // 2, TITLEBAR_H + self.GAP, self.width(), self.height())
+        off = g.topLeft() - self.cap_region.topLeft()
         self.bg_src = QRectF(off.x() * k, off.y() * k, g.width() * k, g.height() * k)
         self.build_glass()
 
@@ -2873,30 +2941,95 @@ class ResultPopup(Panel):
             self.failed = True
             self.note = text[len("FAILED"):].lstrip(": ").split(" (at ")[0]
 
-    def show_text(self, title, sub, ok=True):
+    def show_text(self, title, sub, ok=True, fresh=False):
+        """fresh: a new event (the badge pops again, even if one is up). Otherwise a badge that is already on
+        screen is changed in place: the same event moving from working to its result."""
         if self.isVisible() and not self.out and self.o > 0.05:
-            # Already showing something: shrink and fade that one away first, then bring the new one in.
-            self.bar.stop()
-            self.animate(self.k, self.OUT, self.o, 0.0, False, 130, QEasingCurve.InQuad,
-                         lambda: self.reveal(title, sub, ok))
+            if fresh:
+                self.repop(title, sub, ok)
+            else:
+                self.morph(title, sub, ok)
         else:
             self.reveal(title, sub, ok)
 
-    def reveal(self, title, sub, ok):
+    def repop(self, title, sub, ok):
+        """A new event while a badge is up: swap in the new text and give it a quick pop, with no leaving first."""
+        self.bar.stop()
+        if getattr(self, "glide", None) is not None:
+            self.glide.stop()
+        self.title.set_progress(1.0)
+        self.sub.set_progress(1.0)
+        self.setFixedWidth(self.fill(title, sub, ok))
+        self.snap()
+        self.animate(0.88, 1.0, 0.3, 1.0, False, 300, QEasingCurve.OutQuint)
+
+    def fill(self, title, sub, ok, animate=False):
+        """Put new text and icon in (with a transition if animate) and return the width the badge needs."""
         room = min(520, self.parentWidget().width() - 48) - 210
         self.ok = ok
-        self.icon.set_ok(ok)
-        self.title.setText(QFontMetrics(self.title.font()).elidedText(title, Qt.ElideRight, room))
-        self.sub.setText(QFontMetrics(self.sub.font()).elidedText(sub, Qt.ElideRight, room))
+        self.icon.set_ok(ok, animate)
+        title_text = QFontMetrics(self.title.font()).elidedText(title, Qt.ElideRight, room)
+        sub_text = QFontMetrics(self.sub.font()).elidedText(sub, Qt.ElideRight, room)
+        if animate:
+            self.title.fade_to(title_text)
+            self.sub.fade_to(sub_text)
+        else:
+            for label, text in ((self.title, title_text), (self.sub, sub_text)):
+                label.set_progress(1.0)
+                label.setText(text)
         self.title.setToolTip(title)
         self.sub.setToolTip(sub)
         lay = self.layout()
         lay.invalidate()
         lay.activate()
-        self.setFixedWidth(lay.sizeHint().width())  # sized from the new text, not the previous one
+        return lay.sizeHint().width()
+
+    def reveal(self, title, sub, ok):
+        self.setFixedWidth(self.fill(title, sub, ok))  # sized from the new text, not the previous one
         self.snap()
         self.bar.stop()
         self.animate(self.IN, 1.0, 0.0, 1.0, False, 340, QEasingCurve.OutQuint)
+
+    def morph(self, title, sub, ok):
+        """Turn the badge that is already showing into the next state (working -> applied / failed). One
+        animation drives everything: the old text drifts up and fades, the new text rises in, the icon changes
+        colour and glyph with a small pop, and the width glides to fit."""
+        self.bar.stop()
+        if getattr(self, "glide", None) is not None:
+            self.glide.stop()
+        w0, w1 = self.width(), self.fill(title, sub, ok, animate=True)
+        self.tick.stop()  # no page re-capture while it animates
+        self.snap(max(w0, w1))
+        self.glide = QVariantAnimation(self)
+        self.glide.setStartValue(0.0)
+        self.glide.setEndValue(1.0)
+        self.glide.setDuration(380)
+        self.glide.setEasingCurve(QEasingCurve.Linear)
+        curve = QEasingCurve(QEasingCurve.OutCubic)
+
+        def step(v):
+            v = float(v)
+            self.title.set_progress(v)
+            self.sub.set_progress(v)
+            self.setFixedWidth(int(round(w0 + (w1 - w0) * curve.valueForProgress(min(1.0, v * 1.4)))))
+            self.home()
+            self.fit_glass()
+            self.update()
+
+        def finished():
+            self.title.set_progress(1.0)
+            self.sub.set_progress(1.0)
+            self.tick.start()
+            if self.zoom is None:
+                self.rest()
+        self.glide.valueChanged.connect(step)
+        self.glide.finished.connect(finished)
+        self.glide.start()
+
+    def rest(self):
+        """The badge is settled: leave it up for a few seconds. One that says it is still working stays much longer
+        (the result replaces it), so it cannot vanish before the operation ends."""
+        self.bar.start(self.SHOW_MS if self.ok is not None else 30000)
 
     def animate(self, k0, k1, o0, o1, hide, ms, ease, then=None):
         if self.zoom:
@@ -2956,7 +3089,7 @@ class ResultPopup(Panel):
             self.hide()
             self.k, self.o = 1.0, 0.0
         else:
-            self.bar.start()
+            self.rest()
             self.tick.start()  # live blur resumes once it is at rest
 
     def dismiss(self):
@@ -6698,7 +6831,8 @@ class Kernel(QWidget):
         title = ", ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
         self.tweak_title = title
         targets = {target for _, _, target in operations}
-        self.show_result(title, "Successfully Applied" if targets == {True} else "Successfully Reverted" if targets == {False} else "Done")
+        self.tweak_targets = targets
+        self.show_result("Applying" if targets == {True} else "Reverting" if targets == {False} else "Working", title, None)
 
         def work(job):
             def log(msg):
@@ -6726,9 +6860,10 @@ class Kernel(QWidget):
         self.jobs.submit(self.tweak_job)
 
     def show_result(self, title, sub, ok=True):
-        """Slide the result badge in at the top of the window (the old behaviour was to jump to Activity)."""
+        """Slide the result badge in at the top of the window (the old behaviour was to jump to Activity).
+        ok: True success, False failure, None still working."""
         self.result_popup.failed, self.result_popup.note = False, ""
-        self.result_popup.show_text(title, sub, ok)
+        self.result_popup.show_text(title, sub, ok, fresh=True)
         self.raise_chrome()
 
     def notify(self, title, text):
@@ -6743,9 +6878,14 @@ class Kernel(QWidget):
     def tweaks_changed(self):
         if self.tweak_job and not self.tweak_job.active:
             if getattr(self, "tweak_title", None) is not None:
-                if self.result_popup.failed:  # the one case the badge changes (and shows again)
+                targets = getattr(self, "tweak_targets", {True})
+                if self.result_popup.failed:
                     note = self.result_popup.note
-                    self.result_popup.show_text(self.tweak_title, f"Failed: {note}" if note else "Something went wrong", False)
+                    head = "Couldn't apply" if targets == {True} else "Couldn't revert" if targets == {False} else "Something went wrong"
+                    self.result_popup.show_text(head, note or self.tweak_title, False)
+                else:
+                    head = "Applied" if targets == {True} else "Reverted" if targets == {False} else "Done"
+                    self.result_popup.show_text(head, self.tweak_title, True)
                 self.tweak_title = None
             self.refresh_tweak_rows()
             self.save_applied_states()
