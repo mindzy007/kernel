@@ -2025,7 +2025,7 @@ class TaskRow(Row):
 class RunRow(Row):
     """Single-use action: one click runs it."""
 
-    def __init__(self, title, subtitle, on_run, active=False, warn=True):
+    def __init__(self, title, subtitle, on_run, active=False, warn=True, show_revert=True):
         super().__init__(title, subtitle)
         self.sub.setWordWrap(True)
         if warn:
@@ -2035,10 +2035,11 @@ class RunRow(Row):
         self.b.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
         self.b.clicked.connect(on_run)
         self.right.addWidget(self.b)  # Run sits where Apply normally does
-        self.revert = Button("Revert")  # single-use actions can't be undone: Revert stays in its place, disabled
-        self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
-        self.revert.setEnabled(False)
-        self.right.addWidget(self.revert)
+        if show_revert:  # single-use actions can't be undone: Revert stays in its place, disabled, to keep rows aligned
+            self.revert = Button("Revert")
+            self.revert.setFixedWidth(ROW_ACTION_BUTTON_WIDTH)
+            self.revert.setEnabled(False)
+            self.right.addWidget(self.revert)
         self.set_active(active)
 
     def set_active(self, active):
@@ -5373,7 +5374,11 @@ class Kernel(QWidget):
         run_row = self.run_row
         for cat in SECTION_ORDER:
             page.section(cat)
-            for _, name, desc, fn in (t for t in toggles if t[0] == cat):
+            items = [t for t in visible if t[0] == cat and (t[3].__name__ not in ONE_SHOT or cat in INLINE)]
+            for _, name, desc, fn in sorted(items, key=lambda t: t[1].lower()):  # A-Z within the category
+                if fn.__name__ in ONE_SHOT:
+                    page.add(run_row(name, fn))
+                    continue
                 r = TaskRow(
                     name, desc,
                     lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
@@ -5383,18 +5388,14 @@ class Kernel(QWidget):
                 r.set_active(is_active(fn))
                 self.rows.append((r, fn.__name__, name, fn))
                 page.add(r)
-            action_names = ONE_SHOT if cat in INLINE else set()
-            if action_names:
-                for _, name, desc, fn in (t for t in visible if t[0] == cat and t[3].__name__ in action_names):
-                    page.add(run_row(name, fn))
         if title != "Performance":
             page.col.addStretch()
         return page
 
-    def run_row(self, name, fn):
+    def run_row(self, name, fn, show_revert=True):
         row = RunRow(name, next(t[2] for t in TASKS if t[3] is fn),
                      lambda _=False, n=name, f=fn: self.run_tasks([(n, f)]),
-                     is_active(fn), warn=fn.__name__ != "t_system_repair")
+                     is_active(fn), warn=show_revert and fn.__name__ != "t_system_repair", show_revert=show_revert)
         self.action_rows.append((row, fn))
         return row
 
@@ -5421,7 +5422,7 @@ class Kernel(QWidget):
         page.section("Clean up")
         for cat, name, desc, fn in TASKS:
             if cat == "Storage":
-                page.add(self.run_row(name, fn))
+                page.add(self.run_row(name, fn, show_revert=False))
         page.col.addSpacing(26)
         apps_header = QHBoxLayout()
         apps_header.setContentsMargins(0, 0, 16, 0)
@@ -5768,6 +5769,8 @@ class Kernel(QWidget):
         page = Page("Applications")
         page.col.setContentsMargins(0, 34 + (TITLEBAR_H - 16 if CUSTOM_TITLEBAR else 0), 0, 120)
         page.col.addSpacing(16)
+        self.order_filter = SegmentedFilter([("Item Type", "type"), ("A-Z", "az")], 40)
+        self.order_filter.activated.connect(lambda i: self.set_apps_order(self.order_filter.options[i][1]))
         self.search_box = QLineEdit()
         self.search_box.setObjectName("search")
         self.search_box.setPlaceholderText("Search apps")
@@ -5788,11 +5791,18 @@ class Kernel(QWidget):
         rl.addSpacing(26)
         rs = QLabel("Runtimes")
         rs.setObjectName("section")
-        rl.addWidget(rs)
+        head = QHBoxLayout()  # the order switch sits on the first section's line, right-aligned like the Storage filters
+        head.setContentsMargins(0, 0, 16, 0)
+        head.addWidget(rs)
+        head.addStretch()
+        head.addWidget(self.order_filter)
+        rl.addLayout(head)
         rl.addSpacing(6)
         rl.addWidget(runtime)
         page.col.addWidget(rbox)
-        self.app_groups.append((rbox, [("c++ redistributables visual runtime vcredist", runtime)]))
+        self.runtime_group = (rbox, [("c++ redistributables visual runtime vcredist", runtime)])
+        self.app_groups.append(self.runtime_group)
+        self.cat_groups = []  # (box, its layout, [(name, search text, row)]) per category, for switching the order
         for cat in dict.fromkeys(c[0] for c in apps.CATALOG):
             box = QWidget()
             bl = QVBoxLayout(box)
@@ -5816,10 +5826,50 @@ class Kernel(QWidget):
                 entries.append((f"{cat} {name} {pkg}".lower(), row))
             page.col.addWidget(box)
             self.app_groups.append((box, entries))
+            self.cat_groups.append((box, bl, [(e[0], e[1], name_row) for e, (_, name_row, _, _) in zip(
+                entries, sorted((c for c in apps.CATALOG if c[0] == cat), key=lambda c: c[1].lower()))]))
+        self.az_box = QWidget()  # every app in one list, shown instead of the categories in A-Z mode
+        self.az_layout = QVBoxLayout(self.az_box)
+        self.az_layout.setContentsMargins(0, 0, 0, 0)
+        self.az_layout.setSpacing(2)
+        self.az_layout.addSpacing(26)
+        az_title = QLabel("All apps")
+        az_title.setObjectName("section")
+        self.az_layout.addWidget(az_title)
+        self.az_layout.addSpacing(6)
+        self.az_box.hide()
+        page.col.addWidget(self.az_box)
         page.col.addWidget(self.no_match)
         page.col.addStretch()
         host = ApplicationsHost(page, self.search_box)
         return host
+
+    def set_apps_order(self, mode):
+        """mode: "type" (grouped by category) or "az" (one list, sorted by name)."""
+        if mode == getattr(self, "apps_order", "type"):
+            return
+        self.apps_order = mode
+        everything = sorted((item for _, _, items in self.cat_groups for item in items), key=lambda it: it[2].lower())
+        if mode == "az":
+            for box, bl, items in self.cat_groups:
+                for _, row, _ in items:
+                    bl.removeWidget(row)
+                box.hide()
+            for hay, row, _ in everything:
+                self.az_layout.addWidget(row)
+            self.az_box.show()
+            self.app_groups = [self.runtime_group, (self.az_box, [(hay, row) for hay, row, _ in everything])]
+        else:
+            for _, row, _ in everything:
+                self.az_layout.removeWidget(row)
+            self.az_box.hide()
+            self.app_groups = [self.runtime_group]
+            for box, bl, items in self.cat_groups:
+                for hay, row, _ in sorted(items, key=lambda it: it[2].lower()):
+                    bl.addWidget(row)
+                box.show()
+                self.app_groups.append((box, [(hay, row) for hay, row, _ in items]))
+        self.filter_apps(self.search_box.text())
 
     def filter_apps(self, text):
         q = text.strip().lower()
