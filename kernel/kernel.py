@@ -5991,12 +5991,19 @@ class Kernel(QWidget):
         return page
 
     def add_monitor(self, page):
-        page.section("Live hardware metrics")
+        page.col.addSpacing(26)
+        head = QHBoxLayout()  # the title and the live status share one line
+        head.setContentsMargins(0, 0, 16, 0)
+        title = QLabel("Hardware metrics")
+        title.setObjectName("section")
         self.monitor_status = QLabel("Starting hardware sensors…")
         self.monitor_status.setObjectName("muted")
-        self.monitor_status.setWordWrap(True)
-        self.monitor_status.setContentsMargins(16, 0, 16, 8)
-        page.col.addWidget(self.monitor_status)
+        self.monitor_status.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)  # a long message is cut, never widens the page
+        head.addWidget(title)
+        head.addSpacing(14)
+        head.addWidget(self.monitor_status, 1)
+        page.col.addLayout(head)
+        page.col.addSpacing(8)
 
         self.monitor_cards = {}
         groups = (
